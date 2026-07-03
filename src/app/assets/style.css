@@ -1,0 +1,135 @@
+/* Tokenized theme (§6: minimalistic, generous whitespace, light + dark). */
+:root, .theme-light {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #eef0f4;
+  --border: #e2e5ea;
+  --text: #1f2430;
+  --muted: #7a8194;
+  --accent: #4c7fd6;
+  --risk-red: #d64545;
+  --risk-yellow: #d99a1f;
+  --ok-green: #3d9a63;
+  --shadow: 0 1px 3px rgba(16, 20, 28, 0.08);
+}
+.theme-dark {
+  --bg: #101319;
+  --panel: #1a1f28;
+  --panel-2: #232936;
+  --border: #2c3342;
+  --text: #e8eaf0;
+  --muted: #8b93a7;
+  --accent: #6b9aea;
+  --risk-red: #e05c5c;
+  --risk-yellow: #e6b23c;
+  --ok-green: #4fb87a;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+#root {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  padding: 0 20px 28px;
+}
+
+.header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 18px 2px 14px;
+}
+.header h2 { margin: 0; font-size: 19px; font-weight: 650; flex: 1; letter-spacing: -0.01em; }
+.header .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+}
+
+.kpi-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.kpi {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 14px; min-width: 110px; box-shadow: var(--shadow);
+}
+.kpi .kpi-label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+.kpi .kpi-value { font-size: 17px; font-weight: 650; margin-top: 2px; }
+
+.chip {
+  display: inline-block; padding: 3px 12px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 650; color: #fff;
+}
+.chip-sar { background: var(--risk-red); }
+.chip-edd { background: var(--risk-yellow); }
+.chip-ok  { background: var(--ok-green); }
+
+.score-track { background: var(--panel-2); border-radius: 999px; height: 6px; width: 120px; margin-top: 7px; }
+.score-fill  { border-radius: 999px; height: 6px; }
+
+.main-row, .cards-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.main-row > .card-graph { flex: 2 1 460px; min-width: 0; }
+.main-row > .card-side { flex: 1 1 300px; min-width: 0; }
+.cards-row > .card { flex: 1 1 340px; min-width: 0; }
+
+.controls { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-bottom: 6px; }
+.controls .ctl-label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 11.5px; padding-top: 8px; border-top: 1px solid var(--border); }
+.legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.legend .line { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); margin-right: 5px; vertical-align: 3px; }
+.legend .dashed { border-top-style: dashed; border-top-color: var(--accent); }
+
+.prop-grid { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; }
+.prop-grid .k { color: var(--muted); }
+
+.bar-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; margin: 3px 0; }
+.bar-row .bar-label { flex: 0 0 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .bar-track { flex: 1; background: var(--panel-2); border-radius: 4px; height: 10px; }
+.bar-row .bar-fill { height: 10px; border-radius: 4px; }
+.bar-row .bar-val { flex: 0 0 44px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.path-item { font-size: 12px; margin: 4px 0; }
+.path-item .arrow { color: var(--muted); padding: 0 4px; }
+
+.cpty-item { font-size: 12px; padding: 3px 0; display: flex; gap: 8px; align-items: baseline; }
+.cpty-item .rank { color: var(--muted); flex: 0 0 18px; font-variant-numeric: tabular-nums; }
+
+button.btn {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+}
+button.btn:hover { border-color: var(--accent); color: var(--accent); }
+button.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.btn-primary:hover { color: #fff; filter: brightness(1.08); }
+
+h4.section { margin: 4px 0 8px; font-size: 13px; font-weight: 650; }
+h5.section { margin: 10px 0 4px; font-size: 12px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Dash 4 dcc design tokens — re-mapped onto our theme so sliders, checklists,
+   radio items, and dropdowns follow the light/dark toggle. */
+.theme-light {
+  --Dash-Fill-Interactive-Strong: var(--accent);
+}
+.theme-dark {
+  --Dash-Text-Primary: rgba(232, 234, 240, 0.87);
+  --Dash-Text-Strong: rgba(232, 234, 240, 0.92);
+  --Dash-Text-Weak: rgba(139, 147, 167, 0.95);
+  --Dash-Text-Disabled: rgba(139, 147, 167, 0.6);
+  --Dash-Stroke-Strong: rgba(232, 234, 240, 0.45);
+  --Dash-Stroke-Weak: rgba(232, 234, 240, 0.15);
+  --Dash-Fill-Interactive-Strong: var(--accent);
+  --Dash-Fill-Interactive-Weak: rgba(255, 255, 255, 0.06);
+  --Dash-Fill-Inverse-Strong: #1a1f28;
+  --Dash-Fill-Primary-Hover: rgba(255, 255, 255, 0.05);
+  --Dash-Fill-Primary-Active: rgba(255, 255, 255, 0.09);
+  --Dash-Fill-Disabled: rgba(255, 255, 255, 0.1);
+}
+.dash-dropdown, .dash-dropdown input { color: var(--text); }
+.dash-dropdown .dash-dropdown-control,
+.dash-dropdown .dash-dropdown-menu {
+  background: var(--panel); border-color: var(--border); color: var(--text);
+}
+
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }

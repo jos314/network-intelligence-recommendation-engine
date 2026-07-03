@@ -6,60 +6,95 @@ Encodings (per the build plan):
   * node COLOUR = decision (red = SAR, yellow = EDD, neutral = No action)
   * ring/border = TM-alerted; diamond = the case subject (pinned focus)
   * solid edge  = transaction (arrow along money flow); dashed = identity link
+  * accent glow = the top propagated-risk path (§5.1's highlighted subgraph)
 
 Overwhelm control: default render = subject + level 1; depth slider (1-3),
-min-risk filter, edge-family toggles; click a node -> side panel with its
-properties and its top-20 riskiest counterparties.
+min-risk filter, edge-family toggles, per-node "expand next hop"
+(progressive disclosure). Layouts: force-directed or rings-by-hop-distance.
 
 Run:  .venv/bin/python -m src.app.app   (then open http://127.0.0.1:8050)
 """
+import json
+
 import dash
 import dash_cytoscape as cyto
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
 
 from .. import config
+from ..explain.paths import key_paths
 from ..pipeline import run_all_cases
 
-# ---------------------------------------------------------------- palette
-THEMES = {
-    "light": {"bg": "#fafafa", "panel": "#ffffff", "text": "#1f2430",
-              "muted": "#7a8194", "edge": "#c9cdd6", "node": "#9aa3b2"},
-    "dark": {"bg": "#14161c", "panel": "#1e222b", "text": "#e8eaf0",
-             "muted": "#8b93a7", "edge": "#3a4150", "node": "#5d6675"},
+# ------------------------------------------------- cytoscape-side palette
+# (the canvas cannot read CSS variables; everything else themes via assets/)
+CY = {
+    "light": {"text": "#1f2430", "muted": "#7a8194", "edge": "#c5cad4",
+              "node": "#9aa3b2", "halo": "#ffffff"},
+    "dark": {"text": "#e8eaf0", "muted": "#8b93a7", "edge": "#39404f",
+             "node": "#5d6675", "halo": "#101319"},
 }
-RISK_RED = "#d64545"     # SAR
-RISK_YELLOW = "#e6b23c"  # EDD
-ACCENT = "#4c7fd6"
+RISK_RED = {"light": "#d64545", "dark": "#e05c5c"}
+RISK_YELLOW = {"light": "#d99a1f", "dark": "#e6b23c"}
+OK_GREEN = {"light": "#3d9a63", "dark": "#4fb87a"}
+ACCENT = {"light": "#4c7fd6", "dark": "#6b9aea"}
+
+DECISION_CHIP = {config.DECISION_SAR: "chip chip-sar",
+                 config.DECISION_EDD: "chip chip-edd",
+                 config.DECISION_NO_ACTION: "chip chip-ok"}
 
 
 def _stylesheet(theme):
-    t = THEMES[theme]
+    t = CY[theme]
     return [
         {"selector": "node", "style": {
-            "width": "mapData(risk, 0, 1, 18, 62)",
-            "height": "mapData(risk, 0, 1, 18, 62)",
+            "width": "mapData(risk, 0, 1, 16, 60)",
+            "height": "mapData(risk, 0, 1, 16, 60)",
             "background-color": t["node"],
             "label": "data(label)", "font-size": "9px",
             "color": t["text"], "text-valign": "bottom", "text-margin-y": "4px",
+            "text-outline-color": t["halo"], "text-outline-width": 1.5,
             "border-width": 0,
         }},
-        {"selector": 'node[decision = "EDD"]', "style": {"background-color": RISK_YELLOW}},
-        {"selector": 'node[decision = "SAR"]', "style": {"background-color": RISK_RED}},
-        {"selector": "node[?alerted]", "style": {"border-width": 3, "border-color": RISK_RED}},
-        {"selector": "node[?is_seed]", "style": {"shape": "diamond", "border-width": 3,
-                                                 "border-color": ACCENT}},
+        {"selector": 'node[decision = "EDD"]',
+         "style": {"background-color": RISK_YELLOW[theme]}},
+        {"selector": 'node[decision = "SAR"]',
+         "style": {"background-color": RISK_RED[theme]}},
+        {"selector": "node[?alerted]",
+         "style": {"border-width": 3, "border-color": RISK_RED[theme]}},
+        {"selector": "node[?is_seed]",
+         "style": {"shape": "diamond", "border-width": 3,
+                   "border-color": ACCENT[theme]}},
         {"selector": "edge", "style": {
             "width": "mapData(weight, 0, 1, 1, 5)", "line-color": t["edge"],
-            "curve-style": "bezier",
+            "curve-style": "bezier", "opacity": 0.9,
         }},
         {"selector": 'edge[kind = "txn"]', "style": {
             "target-arrow-shape": "triangle", "target-arrow-color": t["edge"],
+            "arrow-scale": 0.8,
         }},
-        {"selector": 'edge[kind != "txn"]', "style": {"line-style": "dashed",
-                                                      "line-color": ACCENT}},
-        {"selector": "node:selected", "style": {"border-width": 4, "border-color": ACCENT}},
+        {"selector": 'edge[kind != "txn"]',
+         "style": {"line-style": "dashed", "line-color": ACCENT[theme]}},
+        # §5.1: the key propagated-risk path, highlighted in the graph view
+        {"selector": "node.onpath", "style": {
+            "border-width": 4, "border-color": ACCENT[theme],
+            "border-style": "double"}},
+        {"selector": "edge.onpath", "style": {
+            "line-color": ACCENT[theme], "target-arrow-color": ACCENT[theme],
+            "width": 4, "opacity": 1.0, "z-index": 9}},
+        {"selector": "node.focused", "style": {
+            "overlay-color": ACCENT[theme], "overlay-opacity": 0.18,
+            "overlay-padding": 6}},
+        {"selector": "node:selected", "style": {"border-width": 4,
+                                                "border-color": ACCENT[theme]}},
     ]
+
+
+def _layout_spec(mode, seed):
+    if mode == "rings":  # §6: nodes ringed by hop distance around the seed
+        return {"name": "breadthfirst", "circle": True, "animate": False,
+                "roots": '[id = "%s"]' % seed, "spacingFactor": 1.1}
+    return {"name": "cose", "animate": False, "nodeRepulsion": 12000,
+            "idealEdgeLength": 80, "padding": 24}
 
 
 # ------------------------------------------------------------ data (once)
@@ -67,22 +102,56 @@ RUN = run_all_cases(verbose=False)
 CASES = sorted(RUN["results"].keys())
 
 
-def _elements(case_id, depth, min_risk, edge_kinds):
+def _short(n: str) -> str:
+    return ("ext…" + n[-4:]) if n.upper().startswith("PSEUDO_") else n
+
+
+def _node_label(n, attrs) -> str:
+    return (attrs.get("name") or _short(n))[:22]
+
+
+def _top_path_members(case_id):
+    """Nodes and consecutive pairs of the strongest key path."""
+    ego = RUN["results"][case_id]["ego"]
+    paths = key_paths(ego, top_k=1)
+    if not paths:
+        return set(), set()
+    p = paths[0]["path"]
+    return set(p), {frozenset(pair) for pair in zip(p, p[1:])}
+
+
+def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
+              highlight=False, focus=None):
     ego = RUN["results"][case_id]["ego"]
     seed = ego.graph["seed"]
-    visible = {n for n, a in ego.nodes(data=True)
-               if a.get("hop", 99) <= depth
-               and (a.get("final_risk", 0.0) >= min_risk or n == seed)}
+    expanded = set(expanded or [])
+    path_nodes, path_pairs = _top_path_members(case_id) if highlight else (set(), set())
+
+    visible = set()
+    for n, a in ego.nodes(data=True):
+        in_depth = a.get("hop", 99) <= depth
+        if not (in_depth or n in expanded):
+            continue
+        if a.get("final_risk", 0.0) < min_risk and n != seed and n not in expanded:
+            continue
+        visible.add(n)
+
     els = []
     for n in visible:
         a = ego.nodes[n]
+        classes = []
+        if n in path_nodes:
+            classes.append("onpath")
+        if focus and n == focus:
+            classes.append("focused")
         els.append({"data": {
-            "id": n, "label": (a.get("name") or n)[:22],
+            "id": n, "label": _node_label(n, a),
             "risk": round(a.get("final_risk", 0.0), 3),
             "decision": a.get("decision", config.DECISION_NO_ACTION),
             "alerted": bool(a.get("alerted")), "is_seed": n == seed,
             "hop": a.get("hop"),
-        }})
+        }, "classes": " ".join(classes)})
+
     seen_pairs = set()
     for u, v, d in ego.edges(data=True):
         if u not in visible or v not in visible:
@@ -97,8 +166,10 @@ def _elements(case_id, depth, min_risk, edge_kinds):
         seen_pairs.add(pair)
         weight = min((d.get("total_amount_base", 0) / 500_000.0) if kind == "txn"
                      else d.get("weight", 0.5), 1.0)
+        onpath = kind == "txn" and frozenset((u, v)) in path_pairs
         els.append({"data": {"source": u, "target": v, "kind": kind,
-                             "weight": round(weight, 3)}})
+                             "weight": round(weight, 3)},
+                    "classes": "onpath" if onpath else ""})
     return els
 
 
@@ -110,7 +181,7 @@ def _counterparty_frame(case_id) -> pd.DataFrame:
         if n == seed:
             continue
         rows.append({
-            "entity": a.get("name") or n, "id": n, "hop": a.get("hop"),
+            "entity": a.get("name") or _short(n), "id": n, "hop": a.get("hop"),
             "final_risk": round(a.get("final_risk", 0.0), 3),
             "decision": a.get("decision"),
             "alerted": "yes" if a.get("alerted") else "",
@@ -120,101 +191,276 @@ def _counterparty_frame(case_id) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("final_risk", ascending=False)
 
 
-def _node_panel(case_id, node_id, theme):
-    t = THEMES[theme]
+# --------------------------------------------------------- UI fragments
+def _kpis(ev):
+    p = ev["calibrated_score"]
+    fill = ("var(--risk-red)" if p >= config.DECISION_T2
+            else "var(--risk-yellow)" if p >= config.DECISION_T1
+            else "var(--ok-green)")
+    flags = ", ".join(ev["structural_flags"]) or "—"
+    return [
+        html.Div([html.Div("Decision", className="kpi-label"),
+                  html.Div(html.Span(ev["decision"],
+                                     className=DECISION_CHIP[ev["decision"]]),
+                           style={"marginTop": "4px"})], className="kpi"),
+        html.Div([html.Div("Calibrated risk", className="kpi-label"),
+                  html.Div("%.2f" % p, className="kpi-value"),
+                  html.Div(html.Div(className="score-fill",
+                                    style={"width": "%d%%" % round(100 * p),
+                                           "background": fill}),
+                           className="score-track")], className="kpi"),
+        html.Div([html.Div("Alerted neighbours", className="kpi-label"),
+                  html.Div(str(len(ev["alerted_neighbors"])), className="kpi-value")],
+                 className="kpi"),
+        html.Div([html.Div("Sanctioned / watchlist", className="kpi-label"),
+                  html.Div(str(len(ev["sanctioned_neighbors"])), className="kpi-value")],
+                 className="kpi"),
+        html.Div([html.Div("Ego network", className="kpi-label"),
+                  html.Div("%d nodes · %d edges" % (ev["network_size"]["nodes"],
+                                                    ev["network_size"]["edges"]),
+                           className="kpi-value", style={"fontSize": "14px"})],
+                 className="kpi"),
+        html.Div([html.Div("Typology flags", className="kpi-label"),
+                  html.Div(flags, className="kpi-value", style={"fontSize": "14px"})],
+                 className="kpi"),
+        html.Div([html.Div("LOB", className="kpi-label"),
+                  html.Div(ev["lob"] or "—", className="kpi-value")], className="kpi"),
+    ]
+
+
+def _risk_parts_bars(attrs):
+    parts = attrs.get("risk_parts", {})
+    rows = []
+    for part in ("base", "rel", "prop", "struct"):
+        w = config.STAGE_E_WEIGHTS[part]
+        contrib = w * parts.get(part, 0.0)
+        rows.append(html.Div([
+            html.Div("%s (w=%.2f)" % (part, w), className="bar-label"),
+            html.Div(html.Div(className="bar-fill",
+                              style={"width": "%d%%" % round(100 * min(contrib / 0.35, 1.0)),
+                                     "background": "var(--accent)"}),
+                     className="bar-track"),
+            html.Div("%.3f" % contrib, className="bar-val"),
+        ], className="bar-row"))
+    return rows
+
+
+def _node_panel(case_id, node_id):
     ego = RUN["results"][case_id]["ego"]
     if node_id not in ego.nodes:
-        return html.Div("Click a node to inspect it.", style={"color": t["muted"]})
+        return html.Div("Click a node (or search above) to inspect it.",
+                        style={"color": "var(--muted)", "fontSize": "12px"})
     a = ego.nodes[node_id]
+    decision = a.get("decision", config.DECISION_NO_ACTION)
     props = [
-        ("Name", a.get("name") or "—"), ("Type", a.get("node_type")),
-        ("Hop", a.get("hop")), ("Country", a.get("country") or "—"),
+        ("Type", a.get("node_type")), ("Hop", a.get("hop")),
+        ("Country", a.get("country") or "—"),
         ("Country risk", a.get("country_risk") or "—"),
         ("PEP", a.get("pep_flag") or "—"), ("CRR", a.get("crr") or "—"),
         ("Alerted", "yes" if a.get("alerted") else "no"),
         ("Accounts", len(a.get("accounts", []))),
         ("Final risk", "%.3f" % a.get("final_risk", 0.0)),
-        ("Decision", a.get("decision")),
     ]
-    parts = a.get("risk_parts", {})
-    # top-N riskiest counterparties of the CLICKED node
     nbrs = set(ego.successors(node_id)) | set(ego.predecessors(node_id))
     top = sorted(nbrs, key=lambda m: ego.nodes[m].get("final_risk", 0.0),
                  reverse=True)[:config.TOP_COUNTERPARTIES]
     return html.Div([
-        html.H4(node_id, style={"margin": "0 0 8px", "color": t["text"]}),
-        html.Table([html.Tr([html.Td(k, style={"color": t["muted"], "paddingRight": "10px"}),
-                             html.Td(str(v), style={"color": t["text"]})]) for k, v in props],
-                   style={"fontSize": "12px"}),
-        html.Div("Risk parts — base %.2f | rel %.2f | prop %.2f | struct %.2f"
-                 % (parts.get("base", 0), parts.get("rel", 0), parts.get("prop", 0),
-                    parts.get("struct", 0)),
-                 style={"fontSize": "11px", "color": t["muted"], "margin": "8px 0"}),
+        html.Div([
+            html.Span(a.get("name") or _short(node_id),
+                      style={"fontWeight": 650, "fontSize": "14px", "flex": "1"}),
+            html.Span(decision, className=DECISION_CHIP[decision]),
+        ], style={"display": "flex", "alignItems": "center", "gap": "8px",
+                  "marginBottom": "8px"}),
+        html.Div(node_id, style={"color": "var(--muted)", "fontSize": "11px",
+                                 "marginBottom": "8px"}),
+        html.Div([e for k, v in props
+                  for e in (html.Div(k, className="k"), html.Div(str(v)))],
+                 className="prop-grid"),
+        html.H5("Risk decomposition (Stage E)", className="section"),
+        html.Div(_risk_parts_bars(a)),
         html.H5("Top %d riskiest counterparties" % config.TOP_COUNTERPARTIES,
-                style={"margin": "10px 0 4px", "color": t["text"]}),
-        html.Ol([html.Li("%s — %.3f (%s)" % (ego.nodes[m].get("name") or m,
-                                             ego.nodes[m].get("final_risk", 0.0),
-                                             ego.nodes[m].get("decision")),
-                         style={"fontSize": "12px", "color": t["text"]}) for m in top]),
+                className="section"),
+        html.Div([html.Div([
+            html.Span("%d." % (i + 1), className="rank"),
+            html.Span(ego.nodes[m].get("name") or _short(m), style={"flex": "1"}),
+            html.Span("%.3f" % ego.nodes[m].get("final_risk", 0.0),
+                      style={"color": "var(--muted)"}),
+            html.Span(ego.nodes[m].get("decision", ""),
+                      className=DECISION_CHIP.get(ego.nodes[m].get("decision"), ""),
+                      style={"fontSize": "10px", "padding": "1px 8px"}),
+        ], className="cpty-item") for i, m in enumerate(top)]),
     ])
+
+
+def _drivers_card(ev):
+    drivers = ev["top_drivers"]
+    max_mag = max((d["magnitude"] for d in drivers), default=1.0) or 1.0
+    rows = [html.Div([
+        html.Div(d["feature"], className="bar-label", title=d["feature"]),
+        html.Div(html.Div(className="bar-fill",
+                          style={"width": "%d%%" % round(100 * d["magnitude"] / max_mag),
+                                 "background": "var(--risk-red)" if d["direction"] == "+"
+                                 else "var(--ok-green)"}),
+                 className="bar-track"),
+        html.Div("%+.3f" % (d["magnitude"] if d["direction"] == "+" else -d["magnitude"]),
+                 className="bar-val"),
+    ], className="bar-row") for d in drivers]
+    reasons = html.Ul([html.Li(r, style={"fontSize": "11.5px", "color": "var(--muted)"})
+                       for r in ev["decision_reasons"]],
+                      style={"margin": "6px 0 0", "paddingLeft": "18px"})
+    return [html.H4("Why — top risk drivers", className="section"),
+            html.Div(rows), html.H5("Decision rationale", className="section"), reasons]
+
+
+def _paths_card(ev):
+    items = []
+    for i, p in enumerate(ev["key_paths"]):
+        segs = []
+        for j, label in enumerate(p["path"]):
+            if j:
+                segs.append(html.Span("→", className="arrow"))
+            segs.append(html.Span(label))
+        items.append(html.Div(
+            [html.Span("%d. " % (i + 1), style={"color": "var(--muted)"})] + segs +
+            [html.Span("  (prop %.2f)" % p["prop_risk"],
+                       style={"color": "var(--muted)"})], className="path-item"))
+    if not items:
+        items = [html.Div("No propagated-risk paths in this neighbourhood.",
+                          style={"color": "var(--muted)", "fontSize": "12px"})]
+    shared = [html.Div("%s — %s (%s)" % (l["counterparty"], l["kind"], l["value"]),
+                       className="path-item") for l in ev["shared_attribute_links"]]
+    return [html.H4("Key risk paths", className="section"), html.Div(items),
+            html.H5("Shared-attribute links to subject", className="section"),
+            html.Div(shared or [html.Div("None found.",
+                                         style={"color": "var(--muted)",
+                                                "fontSize": "12px"})]),
+            html.Div([
+                html.Button("Download evidence pack (.json)", id="dl-evidence-btn",
+                            className="btn", n_clicks=0),
+                html.Button("Download conclusion prompt (.md)", id="dl-prompt-btn",
+                            className="btn", n_clicks=0),
+            ], style={"display": "flex", "gap": "8px", "marginTop": "12px"})]
+
+
+def _table_styles():
+    return dict(
+        style_table={"overflowX": "auto"},
+        style_cell={"fontSize": "12px",
+                    "fontFamily": "-apple-system, BlinkMacSystemFont, sans-serif",
+                    "padding": "7px 10px", "textAlign": "left",
+                    "backgroundColor": "transparent", "color": "var(--text)",
+                    "border": "none", "borderBottom": "1px solid var(--border)"},
+        style_header={"backgroundColor": "transparent", "color": "var(--muted)",
+                      "fontWeight": "650", "textTransform": "uppercase",
+                      "fontSize": "10.5px", "letterSpacing": "0.05em",
+                      "border": "none", "borderBottom": "2px solid var(--border)"},
+        style_data_conditional=[
+            {"if": {"filter_query": '{decision} = "SAR"', "column_id": "decision"},
+             "color": "var(--risk-red)", "fontWeight": "650"},
+            {"if": {"filter_query": '{decision} = "EDD"', "column_id": "decision"},
+             "color": "var(--risk-yellow)", "fontWeight": "650"},
+            {"if": {"filter_query": "{final_risk} >= 0.5", "column_id": "final_risk"},
+             "color": "var(--risk-red)", "fontWeight": "650"},
+            {"if": {"filter_query": '{alerted} = "yes"', "column_id": "alerted"},
+             "color": "var(--risk-red)"},
+        ],
+    )
+
+
+LEGEND = html.Div([
+    html.Span([html.Span(className="dot",
+                         style={"background": "var(--risk-red)"}), "SAR"]),
+    html.Span([html.Span(className="dot",
+                         style={"background": "var(--risk-yellow)"}), "EDD"]),
+    html.Span([html.Span(className="dot",
+                         style={"background": "var(--muted)"}), "No action"]),
+    html.Span([html.Span(className="dot",
+                         style={"background": "transparent",
+                                "border": "2px solid var(--risk-red)"}),
+               "TM-alerted"]),
+    html.Span("◆ case subject"),
+    html.Span([html.Span(className="line"), "transaction (→ money flow)"]),
+    html.Span([html.Span(className="line dashed"), "identity link"]),
+    html.Span("size = final risk"),
+], className="legend")
 
 
 # ------------------------------------------------------------------- app
 app = dash.Dash(__name__, title="Network Intelligence — Counterparty Risk")
 
+_case_options = [
+    {"label": "Case %d — %s (%s)" % (c, RUN["results"][c]["evidence"]["subject_name"],
+                                     RUN["results"][c]["evidence"]["lob"] or "?"),
+     "value": c} for c in CASES]
 
-def _layout():
-    t = THEMES["light"]
-    return html.Div(id="root", children=[
-        html.Div([
-            html.H2("Counterparty Network Risk", id="title",
-                    style={"margin": "0", "flex": "1"}),
-            html.Label("Case"),
-            dcc.Dropdown(id="case", options=[
-                {"label": "Case %d — %s (%s)" % (c, RUN["results"][c]["evidence"]["subject_name"],
-                                                 RUN["results"][c]["evidence"]["lob"] or "?"),
-                 "value": c} for c in CASES], value=CASES[0], clearable=False,
-                style={"width": "320px"}),
-            html.Button("Dark / light", id="theme-btn", n_clicks=0,
-                        style={"marginLeft": "12px"}),
-        ], style={"display": "flex", "alignItems": "center", "gap": "10px",
-                  "padding": "12px 16px"}),
-        html.Div(id="case-banner", style={"padding": "0 16px 8px", "fontSize": "13px"}),
+app.layout = html.Div(id="root", className="theme-light", children=[
+    html.Div([
+        html.H2(["Counterparty Network Risk",
+                 html.Span("staged scorecard · %s propagation"
+                           % config.PROP_METHOD.upper(), className="sub")]),
+        dcc.Dropdown(id="case", options=_case_options, value=CASES[0],
+                     clearable=False, style={"width": "340px"}),
+        html.Button("☾ / ☀", id="theme-btn", className="btn", n_clicks=0),
+    ], className="header"),
+    html.Div(id="kpi-row", className="kpi-row"),
+    html.Div([
         html.Div([
             html.Div([
-                html.Div([
-                    html.Label("Depth"),
-                    dcc.Slider(id="depth", min=1, max=config.EGO_DEPTH_VIEW, step=1,
-                               value=1, marks={i: str(i) for i in range(1, config.EGO_DEPTH_VIEW + 1)}),
-                    html.Label("Min risk"),
-                    dcc.Slider(id="min-risk", min=0, max=1, step=0.05, value=0.0,
-                               marks={0: "0", 0.5: "0.5", 1: "1"}),
-                    dcc.Checklist(id="edge-kinds",
-                                  options=[{"label": " transactions", "value": "txn"},
-                                           {"label": " identity links", "value": "identity"}],
-                                  value=["txn", "identity"], inline=True),
-                ], style={"padding": "0 16px", "fontSize": "12px"}),
-                cyto.Cytoscape(id="graph", layout={"name": "cose", "animate": False},
-                               style={"width": "100%", "height": "520px"},
-                               elements=[], stylesheet=_stylesheet("light")),
-            ], style={"flex": "2", "minWidth": "0"}),
-            html.Div(id="side-panel",
-                     style={"flex": "1", "padding": "12px 16px", "overflowY": "auto",
-                            "maxHeight": "600px"}),
-        ], style={"display": "flex", "gap": "8px"}),
-        html.H4("Counterparties (ranked by risk)", style={"padding": "0 16px"}),
-        html.Div([dash_table.DataTable(
-            id="cpty-table", sort_action="native", page_size=12,
-            style_table={"overflowX": "auto"},
-            style_cell={"fontSize": "12px", "fontFamily": "system-ui",
-                        "padding": "6px", "textAlign": "left"},
-        )], style={"padding": "0 16px 24px"}),
-        dcc.Store(id="theme-store", data="light"),
-    ], style={"backgroundColor": t["bg"], "color": t["text"],
-              "fontFamily": "system-ui", "minHeight": "100vh"})
-
-
-app.layout = _layout()
+                html.Div([html.Div("Depth", className="ctl-label"),
+                          dcc.Slider(id="depth", min=1, max=config.EGO_DEPTH_VIEW,
+                                     step=1, value=1,
+                                     marks={i: str(i) for i in
+                                            range(1, config.EGO_DEPTH_VIEW + 1)})],
+                         style={"width": "130px"}),
+                html.Div([html.Div("Min risk", className="ctl-label"),
+                          dcc.Slider(id="min-risk", min=0, max=1, step=0.05, value=0.0,
+                                     marks={0: "0", 0.5: "0.5", 1: "1"})],
+                         style={"width": "130px"}),
+                dcc.Checklist(id="edge-kinds",
+                              options=[{"label": " transactions", "value": "txn"},
+                                       {"label": " identity links", "value": "identity"}],
+                              value=["txn", "identity"], inline=True),
+                dcc.RadioItems(id="layout-mode",
+                               options=[{"label": " force", "value": "force"},
+                                        {"label": " rings by hop", "value": "rings"}],
+                               value="force", inline=True),
+                dcc.Checklist(id="highlight-path",
+                              options=[{"label": " highlight key risk path",
+                                        "value": "on"}], value=[], inline=True),
+            ], className="controls"),
+            cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
+                           style={"width": "100%", "height": "500px"},
+                           elements=[], stylesheet=_stylesheet("light"),
+                           responsive=True),
+            LEGEND,
+        ], className="card card-graph"),
+        html.Div([
+            html.Div([
+                dcc.Dropdown(id="node-search", placeholder="Search entity…",
+                             style={"flex": "1"}),
+                html.Button("Expand next hop", id="expand-btn", className="btn",
+                            n_clicks=0),
+            ], style={"display": "flex", "gap": "8px", "marginBottom": "10px",
+                      "alignItems": "center"}),
+            html.Div(id="side-panel", style={"overflowY": "auto",
+                                             "maxHeight": "520px"}),
+        ], className="card card-side"),
+    ], className="main-row"),
+    html.Div([
+        html.Div(id="drivers-card", className="card"),
+        html.Div(id="paths-card", className="card"),
+    ], className="cards-row", style={"marginTop": "12px"}),
+    html.Div([
+        html.H4("Counterparties (ranked by risk)", className="section"),
+        dash_table.DataTable(id="cpty-table", sort_action="native",
+                             filter_action="native", page_size=12,
+                             export_format="csv", **_table_styles()),
+    ], className="card", style={"marginTop": "12px"}),
+    dcc.Store(id="theme-store", data="light"),
+    dcc.Store(id="focus-store"),
+    dcc.Store(id="expanded-store", data=[]),
+    dcc.Download(id="download"),
+])
 
 
 @app.callback(Output("theme-store", "data"), Input("theme-btn", "n_clicks"))
@@ -223,30 +469,79 @@ def _toggle_theme(n):
 
 
 @app.callback(
-    Output("graph", "elements"), Output("graph", "stylesheet"),
-    Output("cpty-table", "data"), Output("cpty-table", "columns"),
-    Output("case-banner", "children"), Output("root", "style"),
-    Output("side-panel", "children"),
-    Input("case", "value"), Input("depth", "value"), Input("min-risk", "value"),
-    Input("edge-kinds", "value"), Input("theme-store", "data"),
-    Input("graph", "tapNodeData"),
+    Output("focus-store", "data"),
+    Input("graph", "tapNodeData"), Input("node-search", "value"),
+    Input("case", "value"),
 )
-def _render(case_id, depth, min_risk, edge_kinds, theme, tap):
-    t = THEMES[theme]
-    els = _elements(case_id, depth, min_risk, edge_kinds or [])
+def _focus(tap, search, case_id):
+    trigger = dash.callback_context.triggered_id
+    if trigger == "graph" and tap:
+        return tap["id"]
+    if trigger == "node-search" and search:
+        return search
+    return RUN["results"][case_id]["evidence"]["subject_id"]
+
+
+@app.callback(
+    Output("expanded-store", "data"),
+    Input("expand-btn", "n_clicks"), Input("case", "value"),
+    State("focus-store", "data"), State("expanded-store", "data"),
+)
+def _expand(n, case_id, focus, expanded):
+    if dash.callback_context.triggered_id != "expand-btn" or not focus:
+        return []  # reset on case change / initial load
+    ego = RUN["results"][case_id]["ego"]
+    if focus not in ego.nodes:
+        return expanded or []
+    nbrs = set(ego.successors(focus)) | set(ego.predecessors(focus))
+    return sorted(set(expanded or []) | nbrs | {focus})
+
+
+@app.callback(
+    Output("graph", "elements"), Output("graph", "stylesheet"),
+    Output("graph", "layout"),
+    Output("cpty-table", "data"), Output("cpty-table", "columns"),
+    Output("kpi-row", "children"), Output("side-panel", "children"),
+    Output("drivers-card", "children"), Output("paths-card", "children"),
+    Output("node-search", "options"), Output("root", "className"),
+    Input("case", "value"), Input("depth", "value"), Input("min-risk", "value"),
+    Input("edge-kinds", "value"), Input("layout-mode", "value"),
+    Input("highlight-path", "value"), Input("theme-store", "data"),
+    Input("focus-store", "data"), Input("expanded-store", "data"),
+)
+def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
+            theme, focus, expanded):
+    r = RUN["results"][case_id]
+    ev = r["evidence"]
+    focus = focus if focus in r["ego"].nodes else ev["subject_id"]
+    els = _elements(case_id, depth, min_risk, edge_kinds or [], expanded,
+                    highlight=bool(highlight), focus=focus)
     frame = _counterparty_frame(case_id)
-    ev = RUN["results"][case_id]["evidence"]
-    banner = "Decision: %s | calibrated p=%.2f | %s | prompt file: %s" % (
-        ev["decision"], ev["calibrated_score"],
-        "; ".join(ev["decision_reasons"][:2]),
-        RUN["results"][case_id]["prompt_path"].name)
-    root_style = {"backgroundColor": t["bg"], "color": t["text"],
-                  "fontFamily": "system-ui", "minHeight": "100vh"}
-    node_id = tap["id"] if tap else ev["subject_id"]
-    panel = _node_panel(case_id, node_id, theme)
-    columns = [{"name": c, "id": c} for c in frame.columns]
-    return (els, _stylesheet(theme), frame.to_dict("records"), columns,
-            banner, root_style, panel)
+    search_opts = [{"label": "%s (%s)" % (a.get("name") or _short(n), _short(n)),
+                    "value": n}
+                   for n, a in sorted(r["ego"].nodes(data=True),
+                                      key=lambda t: t[1].get("final_risk", 0),
+                                      reverse=True)]
+    return (els, _stylesheet(theme), _layout_spec(layout_mode, ev["subject_id"]),
+            frame.to_dict("records"),
+            [{"name": c, "id": c} for c in frame.columns],
+            _kpis(ev), _node_panel(case_id, focus),
+            _drivers_card(ev), _paths_card(ev), search_opts,
+            "theme-%s" % theme)
+
+
+@app.callback(
+    Output("download", "data"),
+    Input("dl-evidence-btn", "n_clicks"), Input("dl-prompt-btn", "n_clicks"),
+    State("case", "value"), prevent_initial_call=True,
+)
+def _download(n_ev, n_pr, case_id):
+    r = RUN["results"][case_id]
+    if dash.callback_context.triggered_id == "dl-evidence-btn":
+        return dict(content=json.dumps(r["evidence"], indent=2, default=str),
+                    filename="evidence_case_%d.json" % case_id)
+    return dict(content=r["prompt_path"].read_text(),
+                filename=r["prompt_path"].name)
 
 
 if __name__ == "__main__":
