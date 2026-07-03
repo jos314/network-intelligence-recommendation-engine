@@ -4,7 +4,8 @@ highlight, progressive expansion, ranked table."""
 import pytest
 
 from src import config
-from src.app.app import CASES, RUN, _counterparty_frame, _elements, _render
+from src.app.app import (CASES, RUN, _counterparty_frame, _elements,
+                         _layout_spec, _render)
 
 
 @pytest.mark.parametrize("case_id", CASES)
@@ -46,6 +47,26 @@ def test_expansion_reveals_nodes_beyond_depth():
     els = _elements(1, 1, 0.0, ["txn", "identity"], expanded=set(beyond))
     ids = {e["data"]["id"] for e in els if "source" not in e["data"]}
     assert set(beyond) <= ids
+
+
+def test_layout_modes():
+    live = _layout_spec("live", "X")
+    assert live["name"] == "cose" and live["animate"] and not live["randomize"]
+    rings = _layout_spec("rings", "X")
+    assert rings["name"] == "breadthfirst" and 'id = "X"' in rings["roots"]
+    assert _layout_spec("force", "X")["name"] == "cose"
+
+
+def test_edge_weights_data_driven():
+    # thickness scale must come from the ego's own volumes, never a constant:
+    # the largest txn edge always normalizes to exactly 1.0
+    for cid in CASES:
+        els = _elements(cid, config.EGO_DEPTH_SCORE, 0.0, ["txn", "identity"])
+        txn_w = [e["data"]["weight"] for e in els
+                 if "source" in e["data"] and e["data"]["kind"] == "txn"]
+        if txn_w:
+            assert max(txn_w) == 1.0
+            assert all(0.0 <= w <= 1.0 for w in txn_w)
 
 
 def test_counterparty_frame_ranked():

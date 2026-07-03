@@ -10,7 +10,12 @@ Encodings (per the build plan):
 
 Overwhelm control: default render = subject + level 1; depth slider (1-3),
 min-risk filter, edge-family toggles, per-node "expand next hop"
-(progressive disclosure). Layouts: force-directed or rings-by-hop-distance.
+(progressive disclosure). Layouts: live physics (Obsidian-style, drag a node
+and the graph springs), static force, or rings-by-hop-distance.
+
+Nothing on this screen is hard-coded to the demo fixture: cases, labels,
+KPIs, drivers, paths, and edge scales all derive from whatever the loaders
+return, so dropping the real tables into data/ changes every element here.
 
 Run:  .venv/bin/python -m src.app.app   (then open http://127.0.0.1:8050)
 """
@@ -20,10 +25,12 @@ import dash
 import dash_cytoscape as cyto
 import pandas as pd
 from dash import Input, Output, State, dash_table, dcc, html
+from dash.exceptions import PreventUpdate
 
 from .. import config
 from ..explain.paths import key_paths
 from ..pipeline import run_all_cases
+
 
 # ------------------------------------------------- cytoscape-side palette
 # (the canvas cannot read CSS variables; everything else themes via assets/)
@@ -93,8 +100,20 @@ def _layout_spec(mode, seed):
     if mode == "rings":  # §6: nodes ringed by hop distance around the seed
         return {"name": "breadthfirst", "circle": True, "animate": False,
                 "roots": '[id = "%s"]' % seed, "spacingFactor": 1.1}
-    return {"name": "cose", "animate": False, "nodeRepulsion": 12000,
-            "idealEdgeLength": 80, "padding": 24}
+    if mode == "force":  # static: compute once, no motion
+        return {"name": "cose", "animate": False, "nodeRepulsion": 12000,
+                "idealEdgeLength": 80, "padding": 24}
+    # "live" (default): animated physics — nodes visibly spring into place,
+    # and a clientside handler re-runs the simulation whenever the user
+    # drops a dragged node, so the graph re-settles like Obsidian's view
+    return dict(_LIVE_PHYSICS, fit=True)
+
+
+# One physics recipe shared by the Python layout prop and the drag-release
+# handler injected below (kept in sync by construction).
+_LIVE_PHYSICS = {"name": "cose", "animate": True, "randomize": False,
+                 "nodeRepulsion": 12000, "idealEdgeLength": 80,
+                 "numIter": 400, "padding": 24}
 
 
 # ------------------------------------------------------------ data (once)
@@ -136,6 +155,12 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
             continue
         visible.add(n)
 
+    # edge-thickness scale derived from this ego's own flow volumes (never a
+    # fixed constant — must hold for whatever the real tables contain)
+    max_amt = max((d.get("total_amount_base", 0.0)
+                   for _, _, d in ego.edges(data=True) if d.get("kind") == "txn"),
+                  default=1.0) or 1.0
+
     els = []
     for n in visible:
         a = ego.nodes[n]
@@ -164,7 +189,7 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
         if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
-        weight = min((d.get("total_amount_base", 0) / 500_000.0) if kind == "txn"
+        weight = min((d.get("total_amount_base", 0.0) / max_amt) if kind == "txn"
                      else d.get("weight", 0.5), 1.0)
         onpath = kind == "txn" and frozenset((u, v)) in path_pairs
         els.append({"data": {"source": u, "target": v, "kind": kind,
@@ -333,13 +358,7 @@ def _paths_card(ev):
             html.H5("Shared-attribute links to subject", className="section"),
             html.Div(shared or [html.Div("None found.",
                                          style={"color": "var(--muted)",
-                                                "fontSize": "12px"})]),
-            html.Div([
-                html.Button("Download evidence pack (.json)", id="dl-evidence-btn",
-                            className="btn", n_clicks=0),
-                html.Button("Download conclusion prompt (.md)", id="dl-prompt-btn",
-                            className="btn", n_clicks=0),
-            ], style={"display": "flex", "gap": "8px", "marginTop": "12px"})]
+                                                "fontSize": "12px"})])]
 
 
 def _table_styles():
@@ -421,12 +440,15 @@ app.layout = html.Div(id="root", className="theme-light", children=[
                                        {"label": " identity links", "value": "identity"}],
                               value=["txn", "identity"], inline=True),
                 dcc.RadioItems(id="layout-mode",
-                               options=[{"label": " force", "value": "force"},
+                               options=[{"label": " live physics", "value": "live"},
+                                        {"label": " force", "value": "force"},
                                         {"label": " rings by hop", "value": "rings"}],
-                               value="force", inline=True),
+                               value="live", inline=True),
                 dcc.Checklist(id="highlight-path",
                               options=[{"label": " highlight key risk path",
                                         "value": "on"}], value=[], inline=True),
+                html.Button("◎ Center subject", id="center-btn", className="btn",
+                            n_clicks=0),
             ], className="controls"),
             cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
                            style={"width": "100%", "height": "500px"},
@@ -448,7 +470,18 @@ app.layout = html.Div(id="root", className="theme-light", children=[
     ], className="main-row"),
     html.Div([
         html.Div(id="drivers-card", className="card"),
-        html.Div(id="paths-card", className="card"),
+        html.Div([
+            html.Div(id="paths-card-content"),
+            # NOTE: these buttons must stay OUTSIDE any callback-rendered
+            # children — re-created Inputs re-fire the download callback,
+            # which used to save a JSON on every slider move.
+            html.Div([
+                html.Button("Download evidence pack (.json)", id="dl-evidence-btn",
+                            className="btn", n_clicks=0),
+                html.Button("Download conclusion prompt (.md)", id="dl-prompt-btn",
+                            className="btn", n_clicks=0),
+            ], style={"display": "flex", "gap": "8px", "marginTop": "12px"}),
+        ], className="card"),
     ], className="cards-row", style={"marginTop": "12px"}),
     html.Div([
         html.H4("Counterparties (ranked by risk)", className="section"),
@@ -459,8 +492,79 @@ app.layout = html.Div(id="root", className="theme-light", children=[
     dcc.Store(id="theme-store", data="light"),
     dcc.Store(id="focus-store"),
     dcc.Store(id="expanded-store", data=[]),
+    dcc.Store(id="center-op"),
+    dcc.Store(id="fit-op"),
     dcc.Download(id="download"),
 ])
+
+# Find the live cytoscape instance — cytoscape.js registers itself (_cyreg)
+# on the container div, which is the #graph element itself; fall back to a
+# descendant scan in case dash-cytoscape ever changes its DOM structure.
+_JS_FIND_CY = """
+    let cy = null;
+    const g = document.getElementById('graph');
+    if (g && g._cyreg && g._cyreg.cy) { cy = g._cyreg.cy; }
+    if (!cy && g) {
+        g.querySelectorAll('div').forEach(function (d) {
+            if (d._cyreg && d._cyreg.cy) { cy = d._cyreg.cy; }
+        });
+    }
+"""
+
+# "Center subject": pan/zoom onto the seed diamond and pulse-select it.
+app.clientside_callback(
+    """
+    function(n) {
+        if (!n) { return window.dash_clientside.no_update; }
+        %s
+        if (cy) {
+            const seed = cy.nodes('[?is_seed]');
+            if (seed.length) {
+                cy.elements().unselect();
+                seed.select();
+                cy.animate({center: {eles: seed}, zoom: 1.8},
+                           {duration: 450, easing: 'ease-in-out'});
+            }
+        }
+        return window.dash_clientside.no_update;
+    }
+    """ % _JS_FIND_CY,
+    Output("center-op", "data"), Input("center-btn", "n_clicks"),
+)
+
+# On every element change: (a) fit once so new nodes are never off-screen,
+# (b) attach — once per cytoscape instance — the Obsidian-style "spring on
+# release" handler: dropping a dragged node re-runs the animated physics so
+# the neighbourhood re-settles around it. Only active in "live" layout mode.
+_JS_SPRING = json.dumps(dict(_LIVE_PHYSICS, fit=False))
+app.clientside_callback(
+    """
+    function(elements) {
+        setTimeout(function () {
+            %s
+            if (!cy) { return; }
+            if (cy.nodes().length) { cy.resize(); cy.fit(undefined, 40); }
+            if (!cy.__springAttached) {
+                cy.__springAttached = true;
+                cy.on('grab', 'node', function (e) {
+                    e.target.__grabPos = Object.assign({}, e.target.position());
+                });
+                cy.on('free', 'node', function (e) {
+                    const mode = document.querySelector(
+                        '#layout-mode input:checked');
+                    if (!mode || mode.value !== 'live') { return; }
+                    const p = e.target.position(), g = e.target.__grabPos;
+                    if (g && Math.hypot(p.x - g.x, p.y - g.y) > 8) {
+                        cy.layout(%s).run();
+                    }
+                });
+            }
+        }, 650);
+        return window.dash_clientside.no_update;
+    }
+    """ % (_JS_FIND_CY, _JS_SPRING),
+    Output("fit-op", "data"), Input("graph", "elements"),
+)
 
 
 @app.callback(Output("theme-store", "data"), Input("theme-btn", "n_clicks"))
@@ -502,7 +606,7 @@ def _expand(n, case_id, focus, expanded):
     Output("graph", "layout"),
     Output("cpty-table", "data"), Output("cpty-table", "columns"),
     Output("kpi-row", "children"), Output("side-panel", "children"),
-    Output("drivers-card", "children"), Output("paths-card", "children"),
+    Output("drivers-card", "children"), Output("paths-card-content", "children"),
     Output("node-search", "options"), Output("root", "className"),
     Input("case", "value"), Input("depth", "value"), Input("min-risk", "value"),
     Input("edge-kinds", "value"), Input("layout-mode", "value"),
@@ -536,8 +640,13 @@ def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
     State("case", "value"), prevent_initial_call=True,
 )
 def _download(n_ev, n_pr, case_id):
+    ctx = dash.callback_context
+    # Guard: only a real button press (n_clicks > 0 on the triggering button)
+    # may download — component re-creation or initial wiring must not.
+    if not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
     r = RUN["results"][case_id]
-    if dash.callback_context.triggered_id == "dl-evidence-btn":
+    if ctx.triggered_id == "dl-evidence-btn":
         return dict(content=json.dumps(r["evidence"], indent=2, default=str),
                     filename="evidence_case_%d.json" % case_id)
     return dict(content=r["prompt_path"].read_text(),
