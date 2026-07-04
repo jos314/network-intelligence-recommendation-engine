@@ -60,17 +60,21 @@ def score_structural(ego) -> None:
     for u, v in ego.edges():
         full_und.add_edge(u, v)
     community_risk = {}
+    community_id = {}
     if full_und.number_of_edges() > 0:
         if len(full_und) > config.STAGE_D_COMMUNITY_LP_N:
             communities = nx.algorithms.community.label_propagation_communities(full_und)
         else:
             communities = nx.algorithms.community.greedy_modularity_communities(full_und)
+        cid = 0
         for com in communities:
             if len(com) < config.MIN_COMMUNITY_SIZE:
                 continue
             mean_base = sum(ego.nodes[n].get("base_risk", 0.0) for n in com) / len(com)
             for n in com:
                 community_risk[n] = mean_base
+                community_id[n] = cid  # membership feeds the cluster view
+            cid += 1
 
     deg = nx.degree_centrality(full_und) if len(full_und) > 1 else {}
     if len(full_und) <= 2:
@@ -93,3 +97,4 @@ def score_structural(ego) -> None:
             config.STAGE_D_WEIGHTS[k] * v for k, v in comps.items()
         )
         ego.nodes[n]["in_cycle"] = n in in_cycle
+        ego.nodes[n]["community_id"] = community_id.get(n)

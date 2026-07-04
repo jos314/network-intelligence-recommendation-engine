@@ -25,6 +25,7 @@ return, so dropping the real tables into data/ changes every element here.
 Run:  .venv/bin/python -m src.app.app   (then open http://127.0.0.1:8050)
 """
 import json
+import os
 
 import dash
 import dash_cytoscape as cyto
@@ -34,6 +35,7 @@ from dash.dash_table.Format import Format, Group, Scheme
 from dash.exceptions import PreventUpdate
 
 from .. import config
+from ..conclusion.store import read_conclusion, write_conclusion
 from ..data_access import DataAccess
 from ..explain.paths import key_paths
 from ..graph.ego import node_flow_summary
@@ -70,13 +72,23 @@ def _stylesheet(theme):
     t = CY[theme]
     return [
         {"selector": "node", "style": {
-            "width": "mapData(risk, 0, 1, 16, 60)",
-            "height": "mapData(risk, 0, 1, 16, 60)",
+            "width": "mapData(risk, 0, 1, 18, 58)",
+            "height": "mapData(risk, 0, 1, 18, 58)",
             "background-color": t["node"],
-            "label": "data(label)", "font-size": "9px",
+            "label": "data(label)", "font-size": "10px",
+            # labels fade out when zoomed away — the declutter that matters
+            "min-zoomed-font-size": 9,
+            "text-wrap": "ellipsis", "text-max-width": "90px",
             "color": t["text"], "text-valign": "bottom", "text-margin-y": "4px",
-            "text-outline-color": t["halo"], "text-outline-width": 1.5,
+            "text-outline-color": t["halo"], "text-outline-width": 2,
             "border-width": 0,
+        }},
+        {"selector": "node[?is_cluster]", "style": {
+            "shape": "hexagon",
+            "width": "mapData(cluster_size, 1, 60, 30, 85)",
+            "height": "mapData(cluster_size, 1, 60, 30, 85)",
+            "border-width": 2, "border-style": "double",
+            "border-color": t["muted"], "font-size": "11px",
         }},
         {"selector": 'node[decision = "EDD"]',
          "style": {"background-color": RISK_YELLOW[theme]}},
@@ -94,12 +106,12 @@ def _stylesheet(theme):
          "style": {"shape": "diamond", "border-width": 3, "border-style": "solid",
                    "border-color": ACCENT[theme]}},
         {"selector": "edge", "style": {
-            "width": "mapData(weight, 0, 1, 1, 5)", "line-color": t["edge"],
-            "curve-style": "bezier", "opacity": 0.9,
+            "width": "mapData(weight, 0, 1, 1, 3.5)", "line-color": t["edge"],
+            "curve-style": "bezier", "opacity": 0.55,
         }},
         {"selector": 'edge[kind = "txn"]', "style": {
             "target-arrow-shape": "triangle", "target-arrow-color": t["edge"],
-            "arrow-scale": 0.8,
+            "arrow-scale": 0.7,
         }},
         {"selector": 'edge[kind != "txn"]',
          "style": {"line-style": "dashed", "line-color": ACCENT[theme]}},
@@ -210,50 +222,81 @@ def _top_path_members(case_id):
     return set(p), {frozenset(pair) for pair in zip(p, p[1:])}
 
 
-def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
-              highlight=False):
-    """Graph elements + disclosure stats.
+def expand_top(ego, node, k=None):
+    """The drill-down primitive: a node's top-K neighbours worth revealing
+    (alerted first, then by risk). Used by double-click and the Expand
+    button — deeper hops appear only through these expansions."""
+    k = k or config.EXPAND_TOP_K
+    nbrs = set(ego.successors(node)) | set(ego.predecessors(node))
+    nbrs.discard(node)
+    ranked = sorted(nbrs, key=lambda m: (not ego.nodes[m].get("alerted"),
+                                         -ego.nodes[m].get("final_risk", 0.0)))
+    return set(ranked[:k]) | {node}
 
-    Evidence-safety rules: alerted nodes are exempt from the min-risk cut;
-    when the key path is highlighted, its nodes are force-included even
-    beyond the depth slider. What filters DO hide is counted in `stats`
-    and disclosed in the graph caption — never silently dropped.
 
-    Parallel txn edges between the same pair are aggregated (summed amount
-    and count, spanned dates) into ONE drawn edge; its data feeds the edge
-    inspector. Returns (elements, stats).
+def _cluster_groups(ego):
+    """Community id -> member list (communities found by Stage D)."""
+    groups = {}
+    for n, a in ego.nodes(data=True):
+        cid = a.get("community_id")
+        if cid is not None:
+            groups.setdefault(cid, []).append(n)
+    return groups
+
+
+def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
+              highlight=False, mode="entities"):
+    """Graph elements + disclosure stats for the drill-down view model.
+
+    entities mode: subject + its TOP-N riskiest direct counterparties;
+    deeper hops appear only via expansions (double-click / Expand button).
+    The highlighted key path is always force-included, alerted nodes among
+    the visible set are exempt from the min-risk cut, and everything hidden
+    is counted in `stats` — never silently dropped.
+
+    clusters mode: one node per Stage-D community (plus the subject and an
+    "unclustered" bucket), edges = aggregated flows between groups — the
+    broad view of the case.
+
+    Returns (elements, stats).
     """
+    if mode == "clusters":
+        return _cluster_elements(case_id)
     ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
     expanded = set(expanded or [])
     path_nodes, path_pairs = _top_path_members(case_id) if highlight else (set(), set())
 
-    visible, hidden_alerted, hidden_flagged = set(), 0, 0
+    hop1 = [n for n, a in ego.nodes(data=True) if a.get("hop") == 1]
+    top_hop1 = sorted(hop1, key=lambda n: ego.nodes[n].get("final_risk", 0.0),
+                      reverse=True)[:top_n]
+    baseline = {seed} | set(top_hop1) | expanded | path_nodes
+
+    visible, hidden_flagged = set(), 0
     path_revealed = 0
-    for n, a in ego.nodes(data=True):
-        in_depth = a.get("hop", 99) <= depth
-        forced = n in expanded or n in path_nodes or n == seed
-        if not (in_depth or forced):
-            if a.get("alerted"):
-                hidden_alerted += 1
+    for n in baseline:
+        if n not in ego.nodes:
             continue
-        risky_exempt = a.get("alerted") or forced
-        if a.get("final_risk", 0.0) < min_risk and not risky_exempt:
+        a = ego.nodes[n]
+        forced = n == seed or n in expanded or n in path_nodes
+        if a.get("final_risk", 0.0) < min_risk and not (forced or a.get("alerted")):
             if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
                 hidden_flagged += 1
             continue
-        if not in_depth and n in path_nodes and n not in expanded:
+        if n in path_nodes and n not in expanded and n != seed \
+                and n not in top_hop1:
             path_revealed += 1
         visible.add(n)
 
-    # canvas cap (hub-scale views): must-draw nodes (seed, alerted, key path,
-    # expansions) always render; the remainder is ranked by risk. The cut is
-    # counted and disclosed in the caption — never silent.
+    alerted_offscreen = sum(1 for n, a in ego.nodes(data=True)
+                            if a.get("alerted") and n not in visible)
+
+    # hard canvas backstop (drill-down keeps views tiny; this only fires if
+    # someone expands dozens of hubs). Must-draw set always survives.
     render_capped = 0
     if len(visible) > config.RENDER_MAX_NODES:
         must = {n for n in visible
-                if n == seed or n in expanded or n in path_nodes
-                or ego.nodes[n].get("alerted")}
+                if n == seed or n in expanded or n in path_nodes}
         rest = sorted(visible - must,
                       key=lambda n: ego.nodes[n].get("final_risk", 0.0),
                       reverse=True)
@@ -322,11 +365,102 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
                     "classes": ""})
 
     stats = {
+        "mode": "entities",
         "nodes_shown": len(visible), "nodes_total": ego.number_of_nodes(),
         "edges_shown": len(txn_groups) + len(ident_groups),
         "edges_total": len(total_groups),
-        "hidden_alerted": hidden_alerted, "hidden_flagged": hidden_flagged,
+        "hop1_shown": sum(1 for n in visible if ego.nodes[n].get("hop") == 1),
+        "hop1_total": len(hop1),
+        "expanded_shown": sum(1 for n in visible
+                              if n in expanded and ego.nodes[n].get("hop", 0) > 1),
+        "alerted_offscreen": alerted_offscreen, "hidden_flagged": hidden_flagged,
         "path_revealed": path_revealed, "render_capped": render_capped,
+    }
+    return els, stats
+
+
+def _cluster_elements(case_id):
+    """The broad view: one node per Stage-D community, plus the subject and
+    an 'unclustered' bucket; edges = aggregated flows between groups."""
+    ego = _result(case_id)["ego"]
+    seed = ego.graph["seed"]
+    groups = _cluster_groups(ego)
+
+    UNCLUSTERED = "cl_rest"
+    node_group = {}
+    for cid, members in groups.items():
+        for n in members:
+            node_group[n] = "cl_%s" % cid
+    for n in ego.nodes:
+        if n not in node_group:
+            node_group[n] = UNCLUSTERED
+    node_group[seed] = seed  # the subject always stands alone
+
+    order = [config.DECISION_NO_ACTION, config.DECISION_EDD, config.DECISION_SAR]
+    els = []
+    seed_a = ego.nodes[seed]
+    els.append({"data": {
+        "id": seed, "label": _node_label(seed, seed_a),
+        "name": seed_a.get("name") or _short(seed),
+        "risk": round(seed_a.get("final_risk", 0.0), 3),
+        "decision": seed_a.get("decision", config.DECISION_NO_ACTION),
+        "alerted": bool(seed_a.get("alerted")), "is_seed": True,
+        "node_type": seed_a.get("node_type"),
+    }, "classes": ""})
+
+    def _cluster_node(gid, members, label):
+        risks = [ego.nodes[m].get("final_risk", 0.0) for m in members]
+        worst = max(members, key=lambda m: order.index(
+            ego.nodes[m].get("decision", config.DECISION_NO_ACTION)))
+        alerted_k = sum(1 for m in members if ego.nodes[m].get("alerted"))
+        els.append({"data": {
+            "id": gid, "label": label, "is_cluster": True,
+            "cluster_size": len(members),
+            "risk": round(max(risks, default=0.0), 3),
+            "decision": ego.nodes[worst].get("decision", config.DECISION_NO_ACTION),
+            "alerted": alerted_k > 0, "alerted_count": alerted_k,
+        }, "classes": "cluster"})
+
+    for cid, members in sorted(groups.items()):
+        members = [m for m in members if m != seed]
+        if not members:
+            continue
+        top = max(members, key=lambda m: ego.nodes[m].get("final_risk", 0.0))
+        label = "%s +%d" % ((ego.nodes[top].get("name")
+                             or _display_id(top, ego.nodes[top]))[:16],
+                            len(members) - 1)
+        _cluster_node("cl_%s" % cid, members, label)
+    rest = [n for n in ego.nodes if node_group[n] == UNCLUSTERED and n != seed]
+    if rest:
+        _cluster_node(UNCLUSTERED, rest, "unclustered (%d)" % len(rest))
+
+    flows = {}
+    for u, v, d in ego.edges(data=True):
+        if d.get("kind") != "txn":
+            continue
+        gu, gv = node_group[u], node_group[v]
+        if gu == gv:
+            continue
+        g = flows.setdefault((gu, gv), {"amount": 0.0, "count": 0})
+        g["amount"] += float(d.get("total_amount_base", 0.0))
+        g["count"] += int(d.get("txn_count", 0))
+    max_amt = max((g["amount"] for g in flows.values()), default=1.0) or 1.0
+    for (gu, gv), g in flows.items():
+        els.append({"data": {
+            "source": gu, "target": gv, "kind": "txn",
+            "weight": round(min(g["amount"] / max_amt, 1.0), 3),
+            "amount": round(g["amount"], 2), "count": g["count"],
+        }, "classes": ""})
+
+    stats = {
+        "mode": "clusters",
+        "nodes_shown": len(els) and sum(1 for e in els if "source" not in e["data"]),
+        "nodes_total": ego.number_of_nodes(),
+        "edges_shown": len(flows), "edges_total": len(flows),
+        "clusters": len(groups), "unclustered": len(rest),
+        "hop1_shown": 0, "hop1_total": 0, "expanded_shown": 0,
+        "alerted_offscreen": 0, "hidden_flagged": 0,
+        "path_revealed": 0, "render_capped": 0,
     }
     return els, stats
 
@@ -437,7 +571,8 @@ def _table_styles():
 
 
 # --------------------------------------------------------- UI fragments
-def _kpis(case_id, ev):
+def _decision_panel(case_id, ev):
+    """Left band column: the call, the score, and why — the first read."""
     ego = _result(case_id)["ego"]
     subject_own = ego.nodes[ev["subject_id"]].get("decision", ev["decision"])
     order = [config.DECISION_NO_ACTION, config.DECISION_EDD, config.DECISION_SAR]
@@ -456,7 +591,13 @@ def _kpis(case_id, ev):
     bands_caption = "< %.2f no action · %.2f–%.2f EDD · ≥ %.2f SAR" % (
         config.DECISION_T1, config.DECISION_T1, config.DECISION_T2, config.DECISION_T2)
 
-    score_children = [
+    return [
+        html.Div("Case decision", className="kpi-label"),
+        html.Div([html.Span(ev["decision"],
+                            className=DECISION_CHIP[ev["decision"]] + " chip-lg")],
+                 style={"margin": "4px 0"}),
+        html.Div("escalated by network evidence", className="kpi-caption")
+        if escalated else html.Span(""),
         html.Div([html.Span(score_label),
                   html.Span(" ⚠", className="warn-badge",
                             title="Calibration fallback: only %d weak positive labels "
@@ -464,8 +605,9 @@ def _kpis(case_id, ev):
                                   % (calibration.get("n_pos", 0),
                                      config.MIN_CALIBRATION_POSITIVES))
                   if not calibrated else html.Span("")],
-                 className="kpi-label", title=GLOSSARY["risk_score"]),
-        html.Div(p_text, className="kpi-value"),
+                 className="kpi-label", title=GLOSSARY["risk_score"],
+                 style={"marginTop": "10px"}),
+        html.Div(p_text, className="kpi-value", style={"fontSize": "22px"}),
         html.Div([
             html.Div(className="score-fill",
                      style={"width": "%d%%" % round(100 * p), "background": fill}),
@@ -475,73 +617,67 @@ def _kpis(case_id, ev):
             html.Div(className="score-tick",
                      style={"left": "%d%%" % round(100 * config.DECISION_T2)},
                      title="t2 = %.2f → SAR" % config.DECISION_T2),
-        ], className="score-track"),
+        ], className="score-track", style={"width": "160px"}),
         html.Div(bands_caption, className="kpi-caption"),
+        html.Div([html.Div("· " + r, className="reason-line")
+                  for r in ev["decision_reasons"][:3]],
+                 style={"marginTop": "10px"}),
     ]
 
-    if config.WATCHLIST_CONNECTED:
-        watchlist_kpi = [html.Div("Sanctioned / watchlist", className="kpi-label"),
-                         html.Div(str(len(ev["sanctioned_neighbors"])),
-                                  className="kpi-value")]
-    else:  # a screening that did not run must never read as a clean 0
-        watchlist_kpi = [html.Div("Sanctioned / watchlist", className="kpi-label"),
-                         html.Div("—", className="kpi-value kpi-disabled"),
-                         html.Div("not screened — no watchlist source",
-                                  className="kpi-caption")]
 
-    flags = ev["structural_flags"]
-    flag_spans = [html.Span(f, title=GLOSSARY.get(f, f),
-                            style={"marginRight": "6px"}) for f in flags] or "—"
+def _quickstats_panel(ev):
+    """Right band column: the secondary facts, one compact grid."""
     window = ev.get("activity_window", {})
-
-    return [
-        html.Div([html.Div("Case decision", className="kpi-label"),
-                  html.Div([html.Span(ev["decision"],
-                                      className=DECISION_CHIP[ev["decision"]]),
-                            html.Span(" escalated by network evidence",
-                                      className="kpi-caption")
-                            if escalated else html.Span("")],
-                           style={"marginTop": "4px"})], className="kpi"),
-        html.Div(score_children, className="kpi"),
-        html.Div([html.Div("Alerted within 2 hops", className="kpi-label",
-                           title="Counterparties with a TM alert at hop 1–2"),
-                  html.Div(str(len(ev["alerted_neighbors"])), className="kpi-value",
-                           title=(", ".join(ev["alerted_neighbors"][:15])
-                                  + (" … and %d more" % (len(ev["alerted_neighbors"]) - 15)
-                                     if len(ev["alerted_neighbors"]) > 15 else ""))
-                           or "none")],
-                 className="kpi"),
-        html.Div(watchlist_kpi, className="kpi"),
-        html.Div([html.Div("Activity window", className="kpi-label",
-                           title="First to last transaction date in this network"),
-                  html.Div("%s → %s" % (window.get("first") or "—",
-                                        window.get("last") or "—"),
-                           className="kpi-value", style={"fontSize": "13px"})],
-                 className="kpi"),
-        html.Div([html.Div("Subject total flow", className="kpi-label",
-                           title="Sum of all transaction amounts touching the subject"),
-                  html.Div(_fmt_money(ev.get("subject_total_flow")),
-                           className="kpi-value")], className="kpi"),
-        html.Div([html.Div("Scored network (depth %s)" % ev["network_size"]["depth"],
-                           className="kpi-label",
-                           title="Scoring always covers the full depth-%s network; "
-                                 "the graph view starts at depth 1"
-                                 % ev["network_size"]["depth"]),
-                  html.Div("%d nodes · %d edges" % (ev["network_size"]["nodes"],
-                                                    ev["network_size"]["edges"]),
-                           className="kpi-value", style={"fontSize": "14px"})],
-                 className="kpi"),
-        html.Div([html.Div("Typology flags", className="kpi-label"),
-                  html.Div(flag_spans, className="kpi-value",
-                           style={"fontSize": "14px"})], className="kpi"),
-        html.Div([html.Div("LOB", className="kpi-label"),
-                  html.Div(ev["lob"] or "—", className="kpi-value")], className="kpi"),
+    if config.WATCHLIST_CONNECTED:
+        watchlist_val = str(len(ev["sanctioned_neighbors"]))
+        watchlist_title = None
+    else:  # a screening that did not run must never read as a clean 0
+        watchlist_val = "not screened"
+        watchlist_title = "no watchlist source connected (open Q5)"
+    alerted = ev["alerted_neighbors"]
+    flags = ", ".join(ev["structural_flags"]) or "—"
+    rows = [
+        ("Alerted ≤ 2 hops", str(len(alerted)),
+         ", ".join(alerted[:15]) + (" …" if len(alerted) > 15 else "")),
+        ("Watchlist", watchlist_val, watchlist_title),
+        ("Activity window", "%s → %s" % (window.get("first") or "—",
+                                         window.get("last") or "—"), None),
+        ("Subject flow", _fmt_money(ev.get("subject_total_flow")), None),
+        ("Scored network", "%s nodes · %s edges"
+         % (format(ev["network_size"]["nodes"], ","),
+            format(ev["network_size"]["edges"], ",")),
+         "full depth-%s scoring; the canvas shows the drill-down view"
+         % ev["network_size"]["depth"]),
+        ("Typologies", flags, " · ".join(GLOSSARY.get(f, f)
+                                         for f in ev["structural_flags"]) or None),
+        ("LOB", ev["lob"] or "—", None),
     ]
+    out = [html.Div("Case facts", className="kpi-label",
+                    style={"marginBottom": "6px"})]
+    for label, value, tip in rows:
+        out.append(html.Div([
+            html.Div(label, className="stat-k"),
+            html.Div(value, className="stat-v", title=tip),
+        ], className="stat-row"))
+    return out
 
 
-def _reasons_row(ev):
-    return [html.Div("· " + r, className="reason-line")
-            for r in ev["decision_reasons"]]
+def _conclusion_content(case_id):
+    """The AI conclusion card body: the Copilot-written file, or the recipe."""
+    text = read_conclusion(case_id)
+    if text:
+        return dcc.Markdown(text, className="conclusion-md")
+    return html.Div([
+        html.Div("No conclusion on file yet.", style={"fontWeight": 600,
+                                                      "marginBottom": "4px"}),
+        html.Div(["Metrics for this case are exported to ",
+                  html.Code("output/case_metrics/case_%s.json" % case_id),
+                  ". In VS Code, ask Copilot to follow ",
+                  html.Code("skills/case-conclusion/SKILL.md"),
+                  " — it writes ",
+                  html.Code("output/conclusions/case_%s.md" % case_id),
+                  ", then press ↻ Refresh (or paste it below)."]),
+    ], className="conclusion-empty")
 
 
 _PART_LABELS = {
@@ -679,6 +815,50 @@ def _edge_panel(case_id, d):
     ])
 
 
+def _cluster_panel(case_id, cluster_id):
+    """Inspector for a tapped cluster: what the group is, top members."""
+    ego = _result(case_id)["ego"]
+    seed = ego.graph["seed"]
+    if cluster_id == "cl_rest":
+        members = [n for n, a in ego.nodes(data=True)
+                   if a.get("community_id") is None and n != seed]
+        title = "Unclustered entities"
+    else:
+        cid = cluster_id.replace("cl_", "")
+        members = [n for n, a in ego.nodes(data=True)
+                   if str(a.get("community_id")) == cid and n != seed]
+        title = "Cluster %s" % cid
+    total_flow = sum(node_flow_summary(ego, m)["total_amount"]
+                     for m in members[:400])  # bounded cost on huge buckets
+    alerted_k = sum(1 for m in members if ego.nodes[m].get("alerted"))
+    top = sorted(members, key=lambda m: ego.nodes[m].get("final_risk", 0.0),
+                 reverse=True)[:config.TOP_COUNTERPARTIES]
+    return html.Div([
+        html.Div([html.Span(title, style={"fontWeight": 650, "fontSize": "14px",
+                                          "flex": "1"}),
+                  html.Span("%d members" % len(members), className="user-chip")],
+                 style={"display": "flex", "gap": "8px", "alignItems": "center",
+                        "marginBottom": "8px"}),
+        html.Div([e for k, v in (
+            ("TM-alerted members", alerted_k),
+            ("Flow (top members)", _fmt_money(total_flow)),
+        ) for e in (html.Div(k, className="k"), html.Div(str(v)))],
+            className="prop-grid"),
+        html.H5("Top members — click to open in entity view", className="section"),
+        html.Div([html.Button([
+            html.Span("%d." % (i + 1), className="rank"),
+            html.Span(ego.nodes[m].get("name") or _display_id(m, ego.nodes[m]),
+                      style={"flex": "1"}),
+            html.Span("%.3f" % ego.nodes[m].get("final_risk", 0.0),
+                      style={"color": "var(--muted)"}),
+            html.Span(ego.nodes[m].get("decision", ""),
+                      className=DECISION_CHIP.get(ego.nodes[m].get("decision"), ""),
+                      style={"fontSize": "10px", "padding": "1px 8px"}),
+        ], id={"type": "cluster-jump", "node": m}, n_clicks=0,
+            className="cpty-item cpty-btn") for i, m in enumerate(top)]),
+    ])
+
+
 def _drivers_card(ev):
     drivers = ev["top_drivers"]
     max_mag = max((d["magnitude"] for d in drivers), default=1.0) or 1.0
@@ -723,29 +903,41 @@ def _paths_card(ev):
 
 
 def _graph_caption(stats, ego):
-    parts = [html.Span("showing %d of %d entities · %d of %d relationships"
-                       % (stats["nodes_shown"], stats["nodes_total"],
-                          stats["edges_shown"], stats["edges_total"]))]
-    hidden_risky = stats["hidden_alerted"] + stats["hidden_flagged"]
-    if hidden_risky:
+    if stats.get("mode") == "clusters":
+        parts = [html.Span("broad view: %d clusters + subject · %d aggregated flows"
+                           % (stats["clusters"], stats["edges_shown"])),
+                 html.Span("click a cluster to list its members",
+                           className="caption-note")]
+        if stats.get("unclustered"):
+            parts.append(html.Span("%s entities without a community sit in "
+                                   "'unclustered'" % format(stats["unclustered"], ",")))
+        return parts
+
+    parts = [html.Span(
+        "top %d of %s direct counterparties by risk"
+        % (stats["hop1_shown"], format(stats["hop1_total"], ","))
+        + (" · %d expanded" % stats["expanded_shown"]
+           if stats["expanded_shown"] else ""),
+        title="Double-click any node (or use the Expand button) to reveal "
+              "its own top counterparties — down to 3 hops.")]
+    if stats["alerted_offscreen"]:
         parts.append(html.Span(
-            "⚠ %d risk-relevant %s outside current filters"
-            % (hidden_risky, "entity is" if hidden_risky == 1 else "entities are"),
+            "%s alerted entities not in view" % format(stats["alerted_offscreen"], ","),
             className="caption-warn",
-            title="Alerted or EDD/SAR entities beyond the depth slider. "
-                  "Raise depth or use Reset filters to see them."))
+            title="They are still scored and in the table — raise Show top, "
+                  "expand nodes, or work the table to reach them."))
+    if stats["hidden_flagged"]:
+        parts.append(html.Span("%d flagged entities hidden by min-risk"
+                               % stats["hidden_flagged"], className="caption-warn"))
     if stats["path_revealed"]:
-        parts.append(html.Span("key path extends beyond depth — %d node%s revealed"
+        parts.append(html.Span("key path revealed %d extra node%s"
                                % (stats["path_revealed"],
                                   "" if stats["path_revealed"] == 1 else "s"),
                                className="caption-note"))
     if stats.get("render_capped"):
-        parts.append(html.Span(
-            "canvas capped: %s lower-risk entities not drawn"
-            % format(stats["render_capped"], ","), className="caption-warn",
-            title="All alerted, key-path and expanded entities are drawn; the "
-                  "remainder is ranked by risk. Use min-risk or the table to "
-                  "work the rest."))
+        parts.append(html.Span("canvas capped: %s not drawn"
+                               % format(stats["render_capped"], ","),
+                               className="caption-warn"))
     # bounded-expansion disclosure on hub-scale graphs (never silent)
     trunc = ego.graph.get("truncation")
     if trunc and trunc.get("neighbours_skipped"):
@@ -753,7 +945,7 @@ def _graph_caption(stats, ego):
             "scored network bounded: %s nodes kept, %s further counterparties "
             "not expanded" % (format(trunc["nodes_scored"], ","),
                               format(trunc["neighbours_skipped"], ",")),
-            className="caption-warn",
+            className="caption-note",
             title="%s. All TM-alerted, PEP and high-CRR neighbours are always "
                   "retained; the skipped remainder are low-flow counterparties. "
                   "Recorded in the evidence pack (governance.scoring_scope)."
@@ -806,9 +998,11 @@ def _login_view():
                  style={"color": "var(--muted)", "fontSize": "12.5px",
                         "marginBottom": "18px"}),
         dcc.Input(id="login-user", placeholder="Username", type="text",
-                  className="login-input", autoFocus=True),
+                  className="login-input", autoFocus=True,
+                  autoComplete="username"),
         dcc.Input(id="login-pass", placeholder="Password", type="password",
-                  className="login-input", n_submit=0),
+                  className="login-input", n_submit=0,
+                  autoComplete="current-password"),
         html.Button("Sign in", id="login-btn", n_clicks=0,
                     className="btn btn-primary login-btn"),
         html.Div(id="login-error", className="login-error"),
@@ -827,40 +1021,71 @@ def _main_layout(user):
             html.Button("Sign out", id="logout-btn", className="btn", n_clicks=0),
             html.Button("☾ / ☀", id="theme-btn", className="btn", n_clicks=0),
         ], className="header"),
-        html.Div(id="kpi-row", className="kpi-row"),
-        html.Div(id="reasons-row", className="reasons-row card"),
+        # ---- case summary band: decision + score | AI conclusion | stats --
+        html.Div([
+            html.Div(id="decision-panel", className="band-col band-decision"),
+            html.Div([
+                html.Div([html.H4("AI conclusion", className="section",
+                                  style={"flex": "1", "margin": 0}),
+                          html.Button("↻ Refresh", id="refresh-conclusion-btn",
+                                      className="btn btn-xs", n_clicks=0)],
+                         style={"display": "flex", "alignItems": "center",
+                                "marginBottom": "6px"}),
+                html.Div(id="conclusion-content", className="conclusion-body"),
+                html.Details([
+                    html.Summary("Edit / paste conclusion"),
+                    dcc.Textarea(id="conclusion-edit", className="conclusion-edit"),
+                    html.Button("Save to case file", id="save-conclusion-btn",
+                                className="btn btn-xs", n_clicks=0,
+                                style={"marginTop": "6px"}),
+                ], className="adv"),
+            ], className="band-col band-conclusion"),
+            html.Div(id="quickstats-panel", className="band-col band-stats"),
+        ], className="card summary-band"),
         html.Div([
             html.Div([
                 html.Div([
-                    html.Div([html.Div("Depth", className="ctl-label"),
-                              dcc.Slider(id="depth", min=1, max=config.EGO_DEPTH_VIEW,
-                                         step=1, value=1,
-                                         marks={i: str(i) for i in
-                                                range(1, config.EGO_DEPTH_VIEW + 1)})],
-                             style={"width": "130px"}),
+                    dcc.RadioItems(id="view-mode",
+                                   options=[{"label": " entities", "value": "entities"},
+                                            {"label": " clusters", "value": "clusters"}],
+                                   value="entities", inline=True),
+                    html.Div([html.Div("Show top", className="ctl-label"),
+                              dcc.Dropdown(id="top-n",
+                                           options=[{"label": str(n), "value": n}
+                                                    for n in config.TOP_N_OPTIONS],
+                                           value=config.TOP_N_DEFAULT, clearable=False,
+                                           style={"width": "80px"})]),
                     html.Div([html.Div("Min risk", className="ctl-label"),
                               dcc.Slider(id="min-risk", min=0, max=1, step=0.05,
-                                         value=0.0,
+                                         value=0.0, updatemode="drag",
                                          marks={0: "0", 0.5: "0.5", 1: "1"})],
-                             style={"width": "130px"}),
-                    dcc.Checklist(id="edge-kinds",
-                                  options=[{"label": " transactions", "value": "txn"},
-                                           {"label": " identity links",
-                                            "value": "identity"}],
-                                  value=["txn", "identity"], inline=True),
-                    dcc.RadioItems(id="layout-mode",
-                                   options=[{"label": " live physics", "value": "live"},
-                                            {"label": " force", "value": "force"},
-                                            {"label": " rings by hop",
-                                             "value": "rings"}],
-                                   value="live", inline=True),
+                             style={"width": "150px"}),
                     dcc.Checklist(id="highlight-path",
-                                  options=[{"label": " highlight key risk path",
+                                  options=[{"label": " key risk path",
                                             "value": "on"}], value=[], inline=True),
                     html.Button("◎ Center subject", id="center-btn", className="btn",
                                 n_clicks=0),
-                    html.Button("Reset filters", id="reset-filters-btn",
+                    html.Button("Reset view", id="reset-view-btn",
                                 className="btn", n_clicks=0),
+                    html.Details([
+                        html.Summary("Advanced"),
+                        html.Div([
+                            dcc.Checklist(id="edge-kinds",
+                                          options=[{"label": " transactions",
+                                                    "value": "txn"},
+                                                   {"label": " identity links",
+                                                    "value": "identity"}],
+                                          value=["txn", "identity"], inline=True),
+                            dcc.RadioItems(id="layout-mode",
+                                           options=[{"label": " live physics",
+                                                     "value": "live"},
+                                                    {"label": " force",
+                                                     "value": "force"},
+                                                    {"label": " rings by hop",
+                                                     "value": "rings"}],
+                                           value="live", inline=True),
+                        ], className="controls", style={"paddingTop": "8px"}),
+                    ], className="adv"),
                 ], className="controls"),
                 cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
                                style={"width": "100%", "height": "500px"},
@@ -901,8 +1126,10 @@ def _main_layout(user):
             ], className="card"),
         ], className="cards-row", style={"marginTop": "12px"}),
         html.Div([
-            html.H4("Counterparties (ranked by risk) — click a row to inspect",
-                    className="section"),
+            html.H4("Counterparties", className="section",
+                    style={"marginBottom": "2px"}),
+            html.Div("ranked by risk — click a row to inspect",
+                     className="sub-note"),
             html.Div(id="table-note", className="kpi-caption"),
             dash_table.DataTable(id="cpty-table", sort_action="native",
                                  filter_action="native", page_size=12,
@@ -915,6 +1142,8 @@ def _main_layout(user):
         dcc.Store(id="center-op"),
         dcc.Store(id="fit-op"),
         dcc.Store(id="focus-op"),
+        dcc.Store(id="dbltap-store"),
+        dcc.Store(id="conclusion-refresh", data=0),
         dcc.Download(id="download"),
     ])
 
@@ -1022,6 +1251,13 @@ app.clientside_callback(
                         cy.layout(%s).run();
                     }
                 });
+                // drill-down: double-click a node to reveal ITS top
+                // counterparties (next hop); clusters don't expand
+                cy.on('dbltap', 'node', function (e) {
+                    if (e.target.data('is_cluster')) { return; }
+                    window.dash_clientside.set_props('dbltap-store',
+                        {data: {id: e.target.id(), ts: Date.now()}});
+                });
             }
         }, 650);
         return window.dash_clientside.no_update;
@@ -1061,10 +1297,11 @@ def _toggle_theme(n):
     Input("center-btn", "n_clicks"),
     Input("cpty-table", "active_cell"),
     Input({"type": "cpty-jump", "node": ALL}, "n_clicks"),
+    Input({"type": "cluster-jump", "node": ALL}, "n_clicks"),
     State("cpty-table", "derived_viewport_data"),
 )
 def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
-             jump_clicks, viewport_rows):
+             jump_clicks, cluster_jump_clicks, viewport_rows):
     """Single writer for what the side panel inspects. Every input except
     the case switch is guarded against fire-on-recreation (the download-bug
     lesson: re-created Input components re-fire their callbacks)."""
@@ -1073,7 +1310,8 @@ def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
     value = ctx.triggered[0]["value"] if ctx.triggered else None
     subject = {"t": "node", "id": DA.case_meta(case_id)["masked"]}
 
-    if isinstance(trigger, dict) and trigger.get("type") == "cpty-jump":
+    if isinstance(trigger, dict) and trigger.get("type") in ("cpty-jump",
+                                                             "cluster-jump"):
         if not value:
             raise PreventUpdate
         return {"t": "node", "id": trigger["node"]}
@@ -1095,6 +1333,8 @@ def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
     if trigger == "graph":
         if not value:
             raise PreventUpdate
+        if value.get("is_cluster"):
+            return {"t": "cluster", "id": value["id"]}
         return {"t": "node", "id": value["id"]}
     if trigger == "node-search":
         if not value:
@@ -1112,6 +1352,9 @@ def _side_panel(inspect, case_id):
     ego = _result(case_id)["ego"]
     if inspect and inspect.get("t") == "edge":
         return _edge_panel(case_id, inspect["d"]), "Expand next hop", True
+    if inspect and inspect.get("t") == "cluster":
+        return (_cluster_panel(case_id, inspect["id"]),
+                "Expand next hop", True)
     node_id = (inspect or {}).get("id")
     if node_id not in ego.nodes:
         node_id = DA.case_meta(case_id)["masked"]
@@ -1123,11 +1366,15 @@ def _side_panel(inspect, case_id):
     Output("expanded-store", "data"),
     Input("expand-btn", "n_clicks"), Input("reset-expand-btn", "n_clicks"),
     Input("case", "value"), Input("cpty-table", "active_cell"),
+    Input("dbltap-store", "data"),
+    Input({"type": "cluster-jump", "node": ALL}, "n_clicks"),
     State("inspect-store", "data"), State("expanded-store", "data"),
-    State("depth", "value"), State("cpty-table", "derived_viewport_data"),
+    State("cpty-table", "derived_viewport_data"),
 )
-def _expand(n_expand, n_reset, case_id, active_cell, inspect, expanded,
-            depth, viewport_rows):
+def _expand(n_expand, n_reset, case_id, active_cell, dbltap, cluster_jumps,
+            inspect, expanded, viewport_rows):
+    """All the ways deeper hops get revealed. Every expansion is that
+    node's TOP-K riskiest neighbours (alerted first) — never a full hub."""
     ctx = dash.callback_context
     trigger = ctx.triggered_id
     value = ctx.triggered[0]["value"] if ctx.triggered else None
@@ -1135,57 +1382,106 @@ def _expand(n_expand, n_reset, case_id, active_cell, inspect, expanded,
 
     if trigger in (None, "case") or (trigger == "reset-expand-btn" and value):
         return []
+    if trigger == "dbltap-store" and value and value.get("id") in ego.nodes:
+        return sorted(set(expanded or []) | expand_top(ego, value["id"]))
     if trigger == "expand-btn" and value:
         focus = (inspect or {}).get("id")
         if (inspect or {}).get("t") != "node" or focus not in ego.nodes:
             raise PreventUpdate
-        nbrs = set(ego.successors(focus)) | set(ego.predecessors(focus))
-        return sorted(set(expanded or []) | nbrs | {focus})
+        return sorted(set(expanded or []) | expand_top(ego, focus))
+    if isinstance(trigger, dict) and trigger.get("type") == "cluster-jump":
+        if not value:
+            raise PreventUpdate
+        node = trigger["node"]  # jump out of the cluster into entity view
+        if node in ego.nodes:
+            return sorted(set(expanded or []) | {node})
+        raise PreventUpdate
     if trigger == "cpty-table" and value and viewport_rows:
         row = value.get("row")
         if row is None or row >= len(viewport_rows):
             raise PreventUpdate
         node = _row_node(viewport_rows[row])
-        # reveal a clicked row that sits beyond the current depth slider
-        if node in ego.nodes and ego.nodes[node].get("hop", 0) > (depth or 1):
+        # reveal a clicked row that isn't part of the current baseline view
+        if node in ego.nodes:
             return sorted(set(expanded or []) | {node})
     raise PreventUpdate
 
 
 @app.callback(
-    Output("depth", "value"), Output("min-risk", "value"),
-    Output("edge-kinds", "value"),
-    Input("reset-filters-btn", "n_clicks"), prevent_initial_call=True,
+    Output("view-mode", "value", allow_duplicate=True),
+    Input({"type": "cluster-jump", "node": ALL}, "n_clicks"),
+    prevent_initial_call=True,
 )
-def _reset_filters(n):
+def _cluster_jump_switches_view(clicks):
+    """Clicking a cluster member opens it in the entity view."""
     ctx = dash.callback_context
     if not ctx.triggered or not ctx.triggered[0]["value"]:
         raise PreventUpdate
-    return 1, 0.0, ["txn", "identity"]
+    return "entities"
+
+
+@app.callback(
+    Output("view-mode", "value"), Output("top-n", "value"),
+    Output("min-risk", "value"), Output("edge-kinds", "value"),
+    Output("highlight-path", "value"),
+    Output("expanded-store", "data", allow_duplicate=True),
+    Input("reset-view-btn", "n_clicks"), prevent_initial_call=True,
+)
+def _reset_view(n):
+    ctx = dash.callback_context
+    if not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
+    return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"], [], [])
+
+
+@app.callback(
+    Output("conclusion-content", "children"), Output("conclusion-edit", "value"),
+    Input("case", "value"), Input("conclusion-refresh", "data"),
+)
+def _conclusion(case_id, _bump):
+    return _conclusion_content(case_id), read_conclusion(case_id) or ""
+
+
+@app.callback(
+    Output("conclusion-refresh", "data"),
+    Input("refresh-conclusion-btn", "n_clicks"),
+    Input("save-conclusion-btn", "n_clicks"),
+    State("conclusion-edit", "value"), State("case", "value"),
+    State("conclusion-refresh", "data"), prevent_initial_call=True,
+)
+def _conclusion_actions(n_refresh, n_save, text, case_id, bump):
+    ctx = dash.callback_context
+    if not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
+    if ctx.triggered_id == "save-conclusion-btn":
+        write_conclusion(case_id, text or "")
+    return (bump or 0) + 1
 
 
 @app.callback(
     Output("graph", "elements"), Output("graph", "stylesheet"),
     Output("graph", "layout"),
     Output("cpty-table", "data"), Output("cpty-table", "columns"),
-    Output("kpi-row", "children"), Output("reasons-row", "children"),
+    Output("decision-panel", "children"), Output("quickstats-panel", "children"),
     Output("graph-caption", "children"),
     Output("drivers-card", "children"), Output("paths-card-content", "children"),
     Output("node-search", "options"), Output("root", "className"),
     Output("view-sig", "data"), Output("table-note", "children"),
     Output("cpty-table", "filter_query"), Output("cpty-table", "sort_by"),
     Output("node-search", "value"),
-    Input("case", "value"), Input("depth", "value"), Input("min-risk", "value"),
+    Input("case", "value"), Input("top-n", "value"), Input("min-risk", "value"),
     Input("edge-kinds", "value"), Input("layout-mode", "value"),
     Input("highlight-path", "value"), Input("theme-store", "data"),
-    Input("expanded-store", "data"),
+    Input("expanded-store", "data"), Input("view-mode", "value"),
 )
-def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
-            theme, expanded):
+def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
+            theme, expanded, view_mode):
     r = _result(case_id)
     ev = r["evidence"]
-    els, stats = _elements(case_id, depth, min_risk, edge_kinds or [], expanded,
-                           highlight=bool(highlight))
+    els, stats = _elements(case_id, top_n or config.TOP_N_DEFAULT, min_risk,
+                           edge_kinds or [], expanded,
+                           highlight=bool(highlight),
+                           mode=view_mode or "entities")
     frame, total_cpty = _counterparty_frame(case_id)
     table_note = ("top %s of %s counterparties by risk — use the search or "
                   "filters to reach the rest"
@@ -1207,12 +1503,13 @@ def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
     else:
         filter_q = sort_by = search_val = dash.no_update
 
-    view_sig = json.dumps([case_id, depth, min_risk, sorted(edge_kinds or []),
+    view_sig = json.dumps([case_id, top_n, min_risk, sorted(edge_kinds or []),
                            layout_mode, sorted(expanded or []),
-                           bool(highlight)])
+                           bool(highlight), view_mode])
     return (els, _stylesheet(theme), _layout_spec(layout_mode, ev["subject_id"]),
             frame.to_dict("records"), _table_columns(frame),
-            _kpis(case_id, ev), _reasons_row(ev), _graph_caption(stats, r["ego"]),
+            _decision_panel(case_id, ev), _quickstats_panel(ev),
+            _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,
             "theme-%s" % theme, view_sig, table_note,
             filter_q, sort_by, search_val)
@@ -1238,4 +1535,4 @@ def _download(n_ev, n_pr, case_id):
 
 
 if __name__ == "__main__":
-    app.run(debug=False, port=8050)
+    app.run(debug=False, port=int(os.environ.get("PORT", "8050")))

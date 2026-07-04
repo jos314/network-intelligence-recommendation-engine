@@ -80,8 +80,42 @@
 .kpi-disabled { color: var(--muted); }
 .warn-badge { color: var(--risk-yellow-text); cursor: help; }
 
-.reasons-row { margin-bottom: 12px; padding: 10px 16px; }
 .reason-line { font-size: 12px; color: var(--text); margin: 2px 0; }
+
+/* case summary band: decision | AI conclusion | facts */
+.summary-band {
+  display: grid; grid-template-columns: 230px minmax(320px, 1fr) 300px;
+  gap: 22px; margin-bottom: 12px;
+}
+@media (max-width: 980px) { .summary-band { grid-template-columns: 1fr; } }
+.band-col { min-width: 0; }
+.band-decision { border-right: 1px solid var(--border); padding-right: 18px; }
+.band-stats { border-left: 1px solid var(--border); padding-left: 18px; }
+@media (max-width: 980px) {
+  .band-decision, .band-stats { border: none; padding: 0; }
+}
+.chip-lg { font-size: 15px; padding: 5px 16px; }
+.stat-row { display: flex; gap: 10px; font-size: 12px; padding: 2.5px 0; }
+.stat-k { color: var(--muted); flex: 0 0 118px; }
+.stat-v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conclusion-body { font-size: 12.5px; line-height: 1.5; max-height: 170px; overflow-y: auto; }
+.conclusion-md p { margin: 0 0 6px; }
+.conclusion-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.conclusion-empty code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.conclusion-edit {
+  width: 100%; box-sizing: border-box; min-height: 90px; margin-top: 6px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px;
+  font-size: 12px; font-family: inherit;
+}
+button.btn-xs { padding: 3px 9px; font-size: 11px; }
+.sub-note { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+
+details.adv summary {
+  color: var(--muted); font-size: 11.5px; cursor: pointer;
+  user-select: none; padding: 2px 0;
+}
+details.adv summary:hover { color: var(--accent); }
 
 .graph-caption {
   display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
@@ -189,7 +223,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .dash-table-container .previous-next-container button:hover,
 .dash-table-container button.export:hover { border-color: var(--accent); }
 
-/* Login gate */
+/* Login gate.
+   NOTE: dcc.Input's className lands on a WRAPPER div, not the <input>
+   itself — style both, or typed text renders unstyled/invisible
+   (especially with Safari autofill, which forces its own text fill). */
 .login-wrap {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
   padding: 20px;
@@ -198,11 +235,25 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .login-mark { font-size: 30px; color: var(--accent); margin-bottom: 8px; }
 .login-input {
   display: block; width: 100%; box-sizing: border-box; margin-bottom: 10px;
-  padding: 9px 12px; font-size: 13px; border-radius: 8px;
-  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.login-input:focus-within { border-color: var(--accent); }
+.login-input input, input.login-input {
+  display: block; width: 100%; box-sizing: border-box;
+  padding: 9px 12px; font-size: 13px; border: none; border-radius: 8px;
+  background: transparent; color: var(--text);
+  caret-color: var(--text);
+  -webkit-text-fill-color: var(--text);
   outline: none;
 }
-.login-input:focus { border-color: var(--accent); }
+.login-input input:-webkit-autofill,
+.login-input input:-webkit-autofill:hover,
+.login-input input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: 0 0 0 40px var(--panel-2) inset;
+  transition: background-color 9999s ease-in-out 0s;
+}
 .login-btn { width: 100%; padding: 9px 12px; font-size: 13px; margin-top: 4px; }
 .login-error { color: var(--risk-red); font-size: 12px; min-height: 18px; margin-top: 10px; }
 

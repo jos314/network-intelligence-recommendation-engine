@@ -34,18 +34,19 @@ def node_decision(attrs: dict) -> dict:
                        % (attrs.get("prop_risk", 0.0), config.OVERRIDE_PROP_RISK))
 
     # 2 — threshold bands
+    p_txt = ("%.3f" if p > 0.985 or p < 0.015 else "%.2f") % p  # no false 1.00
     if p >= config.DECISION_T2:
         band = config.DECISION_SAR
-        reasons.append("Risk score %.2f is at or above the SAR threshold (%.2f)"
-                       % (p, config.DECISION_T2))
+        reasons.append("Risk score %s is at or above the SAR threshold (%.2f)"
+                       % (p_txt, config.DECISION_T2))
     elif p >= config.DECISION_T1:
         band = config.DECISION_EDD
-        reasons.append("Risk score %.2f falls in the enhanced-due-diligence band "
-                       "(%.2f–%.2f)" % (p, config.DECISION_T1, config.DECISION_T2))
+        reasons.append("Risk score %s falls in the enhanced-due-diligence band "
+                       "(%.2f–%.2f)" % (p_txt, config.DECISION_T1, config.DECISION_T2))
     else:
         band = config.DECISION_NO_ACTION
-        reasons.append("Risk score %.2f is below the EDD threshold (%.2f)"
-                       % (p, config.DECISION_T1))
+        reasons.append("Risk score %s is below the EDD threshold (%.2f)"
+                       % (p_txt, config.DECISION_T1))
 
     order = [config.DECISION_NO_ACTION, config.DECISION_EDD, config.DECISION_SAR]
     if floor and order.index(band) < order.index(floor):

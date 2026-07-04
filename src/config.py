@@ -36,8 +36,16 @@ EGO_MAX_NODES = 4000     # hard ceiling per scored network
 # ------------------------------------------------- UI scale caps (disclosed)
 TABLE_MAX_ROWS = 1000    # ranked counterparty table cap (top by risk)
 SEARCH_MAX_OPTIONS = 1000
-RENDER_MAX_NODES = 1200  # canvas cap per view; alerted/path/expanded always
-                         # drawn, remainder ranked by risk (caption discloses)
+RENDER_MAX_NODES = 1200  # hard canvas backstop (drill-down model stays far below)
+
+# ------------------------------------------ graph view: drill-down model
+# Baseline view = subject + its TOP-N riskiest direct counterparties.
+# Deeper hops appear only when the analyst expands a node (double-click or
+# the Expand button); each expansion reveals that node's top-K riskiest
+# neighbours. The cluster view aggregates the scored network by community.
+TOP_N_DEFAULT = 25
+TOP_N_OPTIONS = [10, 25, 50, 100]
+EXPAND_TOP_K = 25
 
 # ------------------------------------------ Stage D scale guards
 STAGE_D_BTW_EXACT_N = 1200    # above this, sample betweenness (k nodes)

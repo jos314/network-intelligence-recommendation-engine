@@ -20,6 +20,7 @@ import threading
 
 from . import config
 from .conclusion.prompt_writer import write_conclusion_prompt
+from .conclusion.store import write_metrics
 from .decision.calibration import fit_calibrator_from_egos, apply_calibration
 from .decision.rules import apply_decisions
 from .explain.evidence import build_evidence_pack
@@ -96,6 +97,7 @@ class DataAccess:
             evidence = build_evidence_pack(ego, case_id,
                                            calibration=self._calibrator.describe())
             prompt_path = write_conclusion_prompt(evidence)
+            write_metrics(evidence)  # feeds the Copilot conclusion skill
             out = {"ego": ego, "evidence": evidence, "prompt_path": prompt_path}
             self._results[case_id] = out
             return out

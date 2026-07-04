@@ -78,22 +78,33 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 
 | Control | What it does |
 |---|---|
-| Depth (1–3) | how many hops around the subject are rendered (default 1 — overwhelm control) |
-| Min risk | hides nodes below the chosen `final_risk` |
-| transactions / identity links | toggle the two edge families separately |
-| live physics / force / rings by hop | layout: animated springs (drag a node and the neighbourhood re-settles, Obsidian-style) / static force / concentric rings by hop distance |
-| highlight key risk path | draws the top Stage-C path on the graph |
-| ◎ Center subject | pans/zooms onto the seed diamond and focuses it in the inspector |
-| Reset filters | depth 1, min risk 0, both edge families back on |
-| Expand next hop of <entity> | reveals the focused node's neighbours beyond the current depth |
-| Reset expansion | undoes all expansions without switching cases |
-| click a node / edge / table row | inspects it in the side panel (the camera stays where you put it) |
-| Search entity… | focus any node by name/id (ranked by risk) |
+| entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view) |
+| Show top (10/25/50/100) | how many of the subject's riskiest DIRECT counterparties form the baseline view |
+| Min risk | live-filters the view while dragging |
+| **double-click a node** | reveals that node's own top-K riskiest counterparties (next hop, down to 3) — the core drill-down gesture |
+| Expand next hop of <entity> / Reset expansion | button equivalent of double-click, and the undo |
+| key risk path | force-draws the top Stage-C path |
+| ◎ Center subject | pans/zooms onto the seed diamond and focuses it |
+| Reset view | entities mode, top 25, min risk 0, no expansions |
+| Advanced | edge-family toggles and layout modes (live physics / force / rings) |
+| click a node / edge / cluster / table row | inspects it (the camera never moves on click) |
+| Search entity… | focus any scored node by name/id |
+
+## The AI conclusion loop (no LLM API — VS Code Copilot)
+
+1. The app exports per-case metrics to `output/case_metrics/case_<n>.json`
+   automatically on every scoring run.
+2. In VS Code, ask Copilot (Claude via Copilot) to follow
+   `skills/case-conclusion/SKILL.md` — it writes plain-language conclusions
+   to `output/conclusions/case_<n>.md` under a strict grounding contract.
+3. Press ↻ Refresh in the app's AI-conclusion card (or paste/edit and Save —
+   the card is the case file's narrative).
 
 ## Analyst workflow (per case)
 
 1. Sign in, pick the case.
-2. Read the KPI row — decision, calibrated score, and why at a glance.
+2. Read the summary band — decision, calibrated score, AI conclusion, and
+   the case facts in one glance.
 3. Work the graph: enable the key-path highlight, expand suspicious nodes,
    check shared-attribute links (nominee signatures).
 4. Work the table top-down — it is the same ego-network as rows, ranked by
