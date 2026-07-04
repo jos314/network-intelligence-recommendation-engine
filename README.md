@@ -41,13 +41,28 @@ python3 -m venv .venv
 [docs/APP.md](docs/APP.md#login). The auth module
 (`src/app/auth.py`) is a deliberate placeholder seam for SSO/LDAP.
 
-## Real data
+## Data sources (priority order)
 
-Drop the six tables into `data/` as `TRANSACTIONS`, `CUSTOMERS`,
-`CUSTOMER_ACCOUNT_LINK`, `ALERTS`, `COUNTRY`, `CASE_CUSTOMERS` with any of
-`.parquet` / `.csv` / `.xlsx` — they are picked up automatically (the demo
-fixture is used only when they are absent). ID columns are read as strings
-so zero-padding and `PSEUDO_` forms survive; the crosswalk normalizes them.
+1. **Prebuilt masked graph** — `GRAPH_NODES.parquet` + `GRAPH_EDGES.parquet`
+   (+ the six raw tables) in `data/` or `data/synthetic/`. This is the real
+   masked HBUS extract's format; generate its full-scale synthetic twin with:
+
+   ```bash
+   .venv/bin/python scripts/generate_synthetic_aml_data.py --out data/synthetic
+   ```
+
+   Cases score lazily (~10 s each, cached). Egos are bounded on this
+   hub-scale graph: top-K counterparties by flow per hop, ALL alerted/PEP/
+   high-CRR neighbours always retained, truncation disclosed in the UI and
+   in `governance.scoring_scope`. See docs/synthetic-data-integration-brief.md.
+
+2. **Six raw tables** in `data/` as `TRANSACTIONS`, `CUSTOMERS`,
+   `CUSTOMER_ACCOUNT_LINK`, `ALERTS`, `COUNTRY`, `CASE_CUSTOMERS`
+   (`.parquet` / `.csv` / `.xlsx`) — the original P0/P1 path builds the
+   graph from scratch.
+
+3. **Demo fixture** — small in-code dataset, used when nothing else exists
+   (and by the test suite via `NIRE_DATA_SOURCE=demo`).
 
 ## Pipeline (data → decision → explanation)
 

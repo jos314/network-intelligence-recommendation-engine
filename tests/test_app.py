@@ -5,8 +5,8 @@ carry amounts/dates, and the table exposes flow columns."""
 import pytest
 
 from src import config
-from src.app.app import (CALIBRATION, CASES, RUN, _counterparty_frame,
-                         _elements, _kpis, _layout_spec, _render)
+from src.app.app import (CASES, DA, _counterparty_frame, _elements, _kpis,
+                         _layout_spec, _render, _result)
 
 
 def _render_case(case_id, **over):
@@ -22,7 +22,8 @@ def _render_case(case_id, **over):
 @pytest.mark.parametrize("case_id", CASES)
 def test_render_all_cases(case_id):
     (els, style, layout, data, cols, kpis, reasons, caption, drivers, paths,
-     opts, theme, view_sig, filter_q, sort_by, search_val) = _render_case(case_id)
+     opts, theme, view_sig, table_note, filter_q, sort_by,
+     search_val) = _render_case(case_id)
     nodes = [e for e in els if "source" not in e["data"]]
     edges = [e for e in els if "source" in e["data"]]
     assert nodes and edges and data and cols and kpis and reasons and caption
@@ -61,7 +62,7 @@ def test_highlighted_path_is_never_truncated_by_filters():
 
 def test_alerted_nodes_exempt_from_min_risk_cut():
     for cid in CASES:
-        ego = RUN["results"][cid]["ego"]
+        ego = _result(cid)["ego"]
         alerted_l1 = [n for n, a in ego.nodes(data=True)
                       if a.get("alerted") and a.get("hop") == 1]
         if not alerted_l1:
@@ -97,7 +98,7 @@ def test_parallel_txn_edges_aggregate():
 
 
 def test_expansion_reveals_nodes_beyond_depth():
-    ego = RUN["results"][1]["ego"]
+    ego = _result(1)["ego"]
     beyond = [n for n, a in ego.nodes(data=True) if a.get("hop", 0) >= 2]
     if not beyond:
         pytest.skip("ego has no depth-2 nodes")
@@ -128,7 +129,8 @@ def test_edge_weights_data_driven():
 
 
 def test_counterparty_frame_ranked_with_flow_columns():
-    frame = _counterparty_frame(4)
+    frame, total = _counterparty_frame(4)
+    assert total >= len(frame)
     risks = frame["final_risk"].tolist()
     assert risks == sorted(risks, reverse=True)
     assert {"entity", "id", "decision", "alerted"} <= set(frame.columns)
@@ -141,12 +143,12 @@ def test_counterparty_frame_ranked_with_flow_columns():
 
 
 def test_kpis_watchlist_honesty_and_calibration_disclosure():
-    ev = RUN["results"][1]["evidence"]
+    ev = _result(1)["evidence"]
     rendered = str(_kpis(1, ev))
     if not config.WATCHLIST_CONNECTED:
         assert "not screened" in rendered
         assert "Sanctioned / watchlist" in rendered
-    if not CALIBRATION.get("calibrated"):
+    if not DA.calibration().get("calibrated"):
         assert "uncalibrated" in rendered
     # threshold ticks are config-driven
     assert "t1 = %.2f" % config.DECISION_T1 in rendered

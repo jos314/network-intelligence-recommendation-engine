@@ -42,15 +42,20 @@ def offline_prep(seed: int = 42, verbose: bool = True) -> dict:
             "cases": cases, "source": loaded["source"]}
 
 
-def score_ego(g, seed_id: str, depth: int = None, method: str = None):
-    """Stages A-E over one subject's ego-network (uncalibrated)."""
-    ego = ego_network(g, seed_id, depth=depth)
+def score_stages(ego, method: str = None):
+    """Stages A-E over an already-extracted ego-network (uncalibrated).
+    Shared by the legacy path and the prebuilt-graph DataAccess."""
     score_base(ego)
     score_relationship(ego)
     score_propagation(ego, method=method)
     score_structural(ego)
     score_aggregate(ego)
     return ego
+
+
+def score_ego(g, seed_id: str, depth: int = None, method: str = None):
+    """Stages A-E over one subject's ego-network (uncalibrated)."""
+    return score_stages(ego_network(g, seed_id, depth=depth), method=method)
 
 
 def run_all_cases(depth: int = None, method: str = None, seed: int = 42,

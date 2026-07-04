@@ -96,5 +96,7 @@ def build_evidence_pack(ego, case_id, calibration=None) -> dict:
             "thresholds": {"t1": config.DECISION_T1, "t2": config.DECISION_T2},
             "calibration": calibration or {"calibrated": None, "method": "unknown"},
             "sources": {"watchlist_connected": config.WATCHLIST_CONNECTED},
+            # bounded-expansion disclosure on hub-scale graphs (None = full)
+            "scoring_scope": ego.graph.get("truncation"),
         },
     }

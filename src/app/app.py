@@ -34,10 +34,10 @@ from dash.dash_table.Format import Format, Group, Scheme
 from dash.exceptions import PreventUpdate
 
 from .. import config
+from ..data_access import DataAccess
 from ..explain.paths import key_paths
 from ..graph.ego import node_flow_summary
 from ..ingest.crosswalk import NODE_EXTERNAL
-from ..pipeline import run_all_cases
 from .auth import verify_credentials
 
 # ------------------------------------------------- cytoscape-side palette
@@ -145,27 +145,50 @@ def _layout_spec(mode, seed):
     return _LAYOUT_CACHE[key]
 
 
-# ------------------------------------------------------------ data (once)
-RUN = run_all_cases(verbose=False)
-CASES = sorted(RUN["results"].keys())
-CALIBRATION = RUN["calibrator"].describe()
+# --------------------------------------------------- data access (lazy)
+# Prebuilt masked graph (full scale) when parquet is present, demo fixture
+# otherwise. Cases score on first selection and cache — eager-scoring six
+# hub-scale networks would stall startup for no benefit.
+DA = DataAccess()
+CASES = DA.case_ids()
+print("Analyst app data source: %s" % DA.source.upper())
+
+
+def _result(case_id):
+    return DA.result(case_id)
 
 
 def _short(n: str) -> str:
-    return ("ext…" + n[-4:]) if n.upper().startswith("PSEUDO_") else n
+    """Compact display for unnamed ids in any scheme (PSEUDO_n, CUS_…, raw)."""
+    u = str(n).upper()
+    if u.startswith("PSEUDO_"):
+        return "ext…" + n[-4:]
+    if u.startswith("CUS_"):
+        return "cus…" + n[-4:]
+    return n
+
+
+def _display_id(n, attrs) -> str:
+    """Prefer the human-meaningful original id over the masked graph key."""
+    orig = attrs.get("original_id")
+    return _short(orig) if orig else _short(n)
 
 
 def _node_label(n, attrs) -> str:
-    return (attrs.get("name") or _short(n))[:22]
+    return (attrs.get("name") or _display_id(n, attrs))[:22]
 
 
 def _name_of(ego, n) -> str:
-    return ego.nodes[n].get("name") or _short(n) if n in ego.nodes else _short(n)
+    if n in ego.nodes:
+        return ego.nodes[n].get("name") or _display_id(n, ego.nodes[n])
+    return _short(n)
 
 
 def _fmt_money(x) -> str:
     if x is None:
         return "—"
+    if abs(x) >= 1_000_000_000:
+        return "$%.2fB" % (x / 1_000_000_000)
     if abs(x) >= 1_000_000:
         return "$%.2fM" % (x / 1_000_000)
     if abs(x) >= 10_000:
@@ -179,7 +202,7 @@ def _fmt_date(ts) -> str:
 
 def _top_path_members(case_id):
     """Nodes and consecutive pairs of the strongest key path."""
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     paths = key_paths(ego, top_k=1)
     if not paths:
         return set(), set()
@@ -200,7 +223,7 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
     and count, spanned dates) into ONE drawn edge; its data feeds the edge
     inspector. Returns (elements, stats).
     """
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
     expanded = set(expanded or [])
     path_nodes, path_pairs = _top_path_members(case_id) if highlight else (set(), set())
@@ -222,6 +245,21 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
         if not in_depth and n in path_nodes and n not in expanded:
             path_revealed += 1
         visible.add(n)
+
+    # canvas cap (hub-scale views): must-draw nodes (seed, alerted, key path,
+    # expansions) always render; the remainder is ranked by risk. The cut is
+    # counted and disclosed in the caption — never silent.
+    render_capped = 0
+    if len(visible) > config.RENDER_MAX_NODES:
+        must = {n for n in visible
+                if n == seed or n in expanded or n in path_nodes
+                or ego.nodes[n].get("alerted")}
+        rest = sorted(visible - must,
+                      key=lambda n: ego.nodes[n].get("final_risk", 0.0),
+                      reverse=True)
+        budget = max(config.RENDER_MAX_NODES - len(must), 0)
+        render_capped = len(rest) - budget
+        visible = must | set(rest[:budget])
 
     els = []
     for n in visible:
@@ -288,7 +326,7 @@ def _elements(case_id, depth, min_risk, edge_kinds, expanded=None,
         "edges_shown": len(txn_groups) + len(ident_groups),
         "edges_total": len(total_groups),
         "hidden_alerted": hidden_alerted, "hidden_flagged": hidden_flagged,
-        "path_revealed": path_revealed,
+        "path_revealed": path_revealed, "render_capped": render_capped,
     }
     return els, stats
 
@@ -298,17 +336,25 @@ _FRAME_COLUMNS = ["entity", "id", "type", "hop", "final_risk", "decision",
                   "last_seen", "volume_share_%", "shared_attrs", "case_id"]
 
 
-def _counterparty_frame(case_id) -> pd.DataFrame:
-    ego = RUN["results"][case_id]["ego"]
+def _counterparty_frame(case_id):
+    """Ranked counterparty rows, capped at TABLE_MAX_ROWS (top by risk).
+
+    Returns (frame, total_counterparties) — the cap is disclosed next to
+    the table, never applied silently."""
+    ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
+    ranked = sorted((n for n in ego.nodes if n != seed),
+                    key=lambda n: ego.nodes[n].get("final_risk", 0.0),
+                    reverse=True)
+    total = len(ranked)
     rows = []
-    for n, a in ego.nodes(data=True):
-        if n == seed:
-            continue
+    for n in ranked[:config.TABLE_MAX_ROWS]:
+        a = ego.nodes[n]
         flow = node_flow_summary(ego, n)
         hop = a.get("hop")
         rows.append({
-            "entity": a.get("name") or _short(n), "id": n,
+            "entity": a.get("name") or _display_id(n, a),
+            "id": a.get("original_id") or n,
             "type": "external" if a.get("node_type") == NODE_EXTERNAL else "customer",
             "hop": hop,
             "final_risk": round(a.get("final_risk", 0.0), 3),
@@ -324,10 +370,11 @@ def _counterparty_frame(case_id) -> pd.DataFrame:
             "shared_attrs": ", ".join(k.replace("same_", "")
                                       for k in a.get("rel_shared_kinds", [])),
             "case_id": case_id,
+            "_node": n,  # graph key for click-to-inspect (hidden column)
         })
     if not rows:  # isolated seed: render an empty table, never a KeyError
-        return pd.DataFrame(columns=_FRAME_COLUMNS)
-    return pd.DataFrame(rows).sort_values("final_risk", ascending=False)
+        return pd.DataFrame(columns=_FRAME_COLUMNS + ["_node"]), 0
+    return pd.DataFrame(rows), total
 
 
 _TABLE_COLUMN_LABELS = {
@@ -344,11 +391,18 @@ _MONEY_FMT = Format(group=Group.yes, precision=0, scheme=Scheme.fixed)
 def _table_columns(frame):
     cols = []
     for c in frame.columns:
+        if c == "_node":  # internal graph key for click-to-inspect
+            continue
         col = {"name": _TABLE_COLUMN_LABELS.get(c, c), "id": c}
         if c == "total_amount":
             col.update(type="numeric", format=_MONEY_FMT)
         cols.append(col)
     return cols
+
+
+def _row_node(row: dict):
+    """Graph key for a clicked table row (falls back to the display id)."""
+    return row.get("_node") or row.get("id")
 
 
 def _table_styles():
@@ -384,7 +438,7 @@ def _table_styles():
 
 # --------------------------------------------------------- UI fragments
 def _kpis(case_id, ev):
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     subject_own = ego.nodes[ev["subject_id"]].get("decision", ev["decision"])
     order = [config.DECISION_NO_ACTION, config.DECISION_EDD, config.DECISION_SAR]
     escalated = order.index(ev["decision"]) > order.index(subject_own)
@@ -394,8 +448,10 @@ def _kpis(case_id, ev):
             else "var(--risk-yellow)" if p >= config.DECISION_T1
             else "var(--ok-green)")
     near_threshold = min(abs(p - config.DECISION_T1), abs(p - config.DECISION_T2)) < 0.02
-    p_text = ("%.3f" if near_threshold else "%.2f") % p
-    calibrated = bool(CALIBRATION.get("calibrated"))
+    near_extreme = p > 0.985 or p < 0.015  # never round to a false 1.00 / 0.00
+    p_text = ("%.3f" if near_threshold or near_extreme else "%.2f") % p
+    calibration = DA.calibration()
+    calibrated = bool(calibration.get("calibrated"))
     score_label = "Calibrated risk" if calibrated else "Risk score (uncalibrated)"
     bands_caption = "< %.2f no action · %.2f–%.2f EDD · ≥ %.2f SAR" % (
         config.DECISION_T1, config.DECISION_T1, config.DECISION_T2, config.DECISION_T2)
@@ -405,7 +461,7 @@ def _kpis(case_id, ev):
                   html.Span(" ⚠", className="warn-badge",
                             title="Calibration fallback: only %d weak positive labels "
                                   "(need %d). Thresholds ride on the raw score."
-                                  % (CALIBRATION.get("n_pos", 0),
+                                  % (calibration.get("n_pos", 0),
                                      config.MIN_CALIBRATION_POSITIVES))
                   if not calibrated else html.Span("")],
                  className="kpi-label", title=GLOSSARY["risk_score"]),
@@ -450,7 +506,10 @@ def _kpis(case_id, ev):
         html.Div([html.Div("Alerted within 2 hops", className="kpi-label",
                            title="Counterparties with a TM alert at hop 1–2"),
                   html.Div(str(len(ev["alerted_neighbors"])), className="kpi-value",
-                           title=", ".join(ev["alerted_neighbors"]) or "none")],
+                           title=(", ".join(ev["alerted_neighbors"][:15])
+                                  + (" … and %d more" % (len(ev["alerted_neighbors"]) - 15)
+                                     if len(ev["alerted_neighbors"]) > 15 else ""))
+                           or "none")],
                  className="kpi"),
         html.Div(watchlist_kpi, className="kpi"),
         html.Div([html.Div("Activity window", className="kpi-label",
@@ -518,7 +577,7 @@ def _risk_parts_bars(attrs):
 
 
 def _node_panel(case_id, node_id):
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     if node_id not in ego.nodes:
         return html.Div("Click a node or edge (or search above) to inspect it.",
                         style={"color": "var(--muted)", "fontSize": "12px"})
@@ -553,6 +612,7 @@ def _node_panel(case_id, node_id):
             props.insert(9, ("Share of subject flow", "%.1f%%" % (100 * share)))
 
     nbrs = set(ego.successors(node_id)) | set(ego.predecessors(node_id))
+    nbrs.discard(node_id)  # self-loop rows exist in the extract
     top = sorted(nbrs, key=lambda m: ego.nodes[m].get("final_risk", 0.0),
                  reverse=True)[:config.TOP_COUNTERPARTIES]
     return html.Div([
@@ -585,7 +645,7 @@ def _node_panel(case_id, node_id):
 
 def _edge_panel(case_id, d):
     """Inspector for a tapped edge — the transaction relationship itself."""
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     src, dst = _name_of(ego, d.get("source")), _name_of(ego, d.get("target"))
     if d.get("kind") == "txn":
         props = [
@@ -662,7 +722,7 @@ def _paths_card(ev):
                                                 "fontSize": "12px"})])]
 
 
-def _graph_caption(stats):
+def _graph_caption(stats, ego):
     parts = [html.Span("showing %d of %d entities · %d of %d relationships"
                        % (stats["nodes_shown"], stats["nodes_total"],
                           stats["edges_shown"], stats["edges_total"]))]
@@ -679,6 +739,25 @@ def _graph_caption(stats):
                                % (stats["path_revealed"],
                                   "" if stats["path_revealed"] == 1 else "s"),
                                className="caption-note"))
+    if stats.get("render_capped"):
+        parts.append(html.Span(
+            "canvas capped: %s lower-risk entities not drawn"
+            % format(stats["render_capped"], ","), className="caption-warn",
+            title="All alerted, key-path and expanded entities are drawn; the "
+                  "remainder is ranked by risk. Use min-risk or the table to "
+                  "work the rest."))
+    # bounded-expansion disclosure on hub-scale graphs (never silent)
+    trunc = ego.graph.get("truncation")
+    if trunc and trunc.get("neighbours_skipped"):
+        parts.append(html.Span(
+            "scored network bounded: %s nodes kept, %s further counterparties "
+            "not expanded" % (format(trunc["nodes_scored"], ","),
+                              format(trunc["neighbours_skipped"], ",")),
+            className="caption-warn",
+            title="%s. All TM-alerted, PEP and high-CRR neighbours are always "
+                  "retained; the skipped remainder are low-flow counterparties. "
+                  "Recorded in the evidence pack (governance.scoring_scope)."
+                  % trunc["strategy"]))
     return parts
 
 
@@ -710,9 +789,11 @@ LEGEND = html.Div([
 app = dash.Dash(__name__, title="Network Intelligence — Counterparty Risk",
                 suppress_callback_exceptions=True)
 
+# labels come from lightweight case metadata — building them from evidence
+# would force-score all six networks at import
 _case_options = [
-    {"label": "Case %d — %s (%s)" % (c, RUN["results"][c]["evidence"]["subject_name"],
-                                     RUN["results"][c]["evidence"]["lob"] or "?"),
+    {"label": "Case %d — %s (%s)" % (c, DA.case_meta(c)["name"],
+                                     DA.case_meta(c)["lob"] or "?"),
      "value": c} for c in CASES]
 
 
@@ -822,6 +903,7 @@ def _main_layout(user):
         html.Div([
             html.H4("Counterparties (ranked by risk) — click a row to inspect",
                     className="section"),
+            html.Div(id="table-note", className="kpi-caption"),
             dash_table.DataTable(id="cpty-table", sort_action="native",
                                  filter_action="native", page_size=12,
                                  export_format="csv", **_table_styles()),
@@ -989,7 +1071,7 @@ def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
     ctx = dash.callback_context
     trigger = ctx.triggered_id
     value = ctx.triggered[0]["value"] if ctx.triggered else None
-    subject = {"t": "node", "id": RUN["results"][case_id]["evidence"]["subject_id"]}
+    subject = {"t": "node", "id": DA.case_meta(case_id)["masked"]}
 
     if isinstance(trigger, dict) and trigger.get("type") == "cpty-jump":
         if not value:
@@ -1001,7 +1083,7 @@ def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
         row = value.get("row")
         if row is None or row >= len(viewport_rows):
             raise PreventUpdate
-        return {"t": "node", "id": viewport_rows[row]["id"]}
+        return {"t": "node", "id": _row_node(viewport_rows[row])}
     if trigger == "center-btn":
         if not value:
             raise PreventUpdate
@@ -1027,12 +1109,12 @@ def _inspect(tap_node, tap_edge, search, case_id, center_n, active_cell,
     Input("inspect-store", "data"), Input("case", "value"),
 )
 def _side_panel(inspect, case_id):
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
     if inspect and inspect.get("t") == "edge":
         return _edge_panel(case_id, inspect["d"]), "Expand next hop", True
     node_id = (inspect or {}).get("id")
     if node_id not in ego.nodes:
-        node_id = RUN["results"][case_id]["evidence"]["subject_id"]
+        node_id = DA.case_meta(case_id)["masked"]
     label = "Expand next hop of %s" % (_name_of(ego, node_id))
     return _node_panel(case_id, node_id), label, False
 
@@ -1049,7 +1131,7 @@ def _expand(n_expand, n_reset, case_id, active_cell, inspect, expanded,
     ctx = dash.callback_context
     trigger = ctx.triggered_id
     value = ctx.triggered[0]["value"] if ctx.triggered else None
-    ego = RUN["results"][case_id]["ego"]
+    ego = _result(case_id)["ego"]
 
     if trigger in (None, "case") or (trigger == "reset-expand-btn" and value):
         return []
@@ -1063,7 +1145,7 @@ def _expand(n_expand, n_reset, case_id, active_cell, inspect, expanded,
         row = value.get("row")
         if row is None or row >= len(viewport_rows):
             raise PreventUpdate
-        node = viewport_rows[row]["id"]
+        node = _row_node(viewport_rows[row])
         # reveal a clicked row that sits beyond the current depth slider
         if node in ego.nodes and ego.nodes[node].get("hop", 0) > (depth or 1):
             return sorted(set(expanded or []) | {node})
@@ -1090,7 +1172,7 @@ def _reset_filters(n):
     Output("graph-caption", "children"),
     Output("drivers-card", "children"), Output("paths-card-content", "children"),
     Output("node-search", "options"), Output("root", "className"),
-    Output("view-sig", "data"),
+    Output("view-sig", "data"), Output("table-note", "children"),
     Output("cpty-table", "filter_query"), Output("cpty-table", "sort_by"),
     Output("node-search", "value"),
     Input("case", "value"), Input("depth", "value"), Input("min-risk", "value"),
@@ -1100,16 +1182,21 @@ def _reset_filters(n):
 )
 def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
             theme, expanded):
-    r = RUN["results"][case_id]
+    r = _result(case_id)
     ev = r["evidence"]
     els, stats = _elements(case_id, depth, min_risk, edge_kinds or [], expanded,
                            highlight=bool(highlight))
-    frame = _counterparty_frame(case_id)
-    search_opts = [{"label": "%s (%s)" % (a.get("name") or _short(n), _short(n)),
+    frame, total_cpty = _counterparty_frame(case_id)
+    table_note = ("top %s of %s counterparties by risk — use the search or "
+                  "filters to reach the rest"
+                  % (format(len(frame), ","), format(total_cpty, ","))
+                  if total_cpty > len(frame) else "")
+    ranked_nodes = sorted(r["ego"].nodes(data=True),
+                          key=lambda t: t[1].get("final_risk", 0), reverse=True)
+    search_opts = [{"label": "%s (%s)" % (a.get("name") or _display_id(n, a),
+                                          _display_id(n, a)),
                     "value": n}
-                   for n, a in sorted(r["ego"].nodes(data=True),
-                                      key=lambda t: t[1].get("final_risk", 0),
-                                      reverse=True)]
+                   for n, a in ranked_nodes[:config.SEARCH_MAX_OPTIONS]]
     # analytic state (table filter/sort, search) resets on case switch only
     try:
         trigger = dash.callback_context.triggered_id
@@ -1125,9 +1212,9 @@ def _render(case_id, depth, min_risk, edge_kinds, layout_mode, highlight,
                            bool(highlight)])
     return (els, _stylesheet(theme), _layout_spec(layout_mode, ev["subject_id"]),
             frame.to_dict("records"), _table_columns(frame),
-            _kpis(case_id, ev), _reasons_row(ev), _graph_caption(stats),
+            _kpis(case_id, ev), _reasons_row(ev), _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,
-            "theme-%s" % theme, view_sig,
+            "theme-%s" % theme, view_sig, table_note,
             filter_q, sort_by, search_val)
 
 
@@ -1142,7 +1229,7 @@ def _download(n_ev, n_pr, case_id):
     # may download — component re-creation or initial wiring must not.
     if not ctx.triggered or not ctx.triggered[0]["value"]:
         raise PreventUpdate
-    r = RUN["results"][case_id]
+    r = _result(case_id)
     if ctx.triggered_id == "dl-evidence-btn":
         return dict(content=json.dumps(r["evidence"], indent=2, default=str),
                     filename="evidence_case_%d.json" % case_id)

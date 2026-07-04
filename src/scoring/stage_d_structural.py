@@ -28,25 +28,43 @@ def score_structural(ego) -> None:
     und = nx.Graph(txn_dg.to_undirected())
     und.add_nodes_from(ego.nodes)
 
-    # cycles (bounded)
+    # cycles. Enumerating cycles costs O(#cycles), which explodes
+    # combinatorially through hub nodes — so the test is SCC-based
+    # (linear): a node lies on SOME directed cycle iff its strongly
+    # connected component has size >= 2 (or it has a self-loop). Short
+    # cycles (<= MAX_CYCLE_LEN) are only enumerated inside SMALL SCCs,
+    # where the count cannot blow up.
     in_cycle = set()
-    try:
-        for cyc in nx.simple_cycles(txn_dg, length_bound=config.MAX_CYCLE_LEN):
-            if len(cyc) >= 2:
-                in_cycle.update(cyc)
-    except TypeError:  # older networkx: no length_bound
-        for cyc in nx.simple_cycles(txn_dg):
-            if 2 <= len(cyc) <= config.MAX_CYCLE_LEN:
-                in_cycle.update(cyc)
+    for comp in nx.strongly_connected_components(txn_dg):
+        if len(comp) < 2:
+            continue
+        if len(comp) <= config.CYCLE_SCC_ENUM_MAX:
+            sub = txn_dg.subgraph(comp)
+            try:
+                for cyc in nx.simple_cycles(sub, length_bound=config.MAX_CYCLE_LEN):
+                    if len(cyc) >= 2:
+                        in_cycle.update(cyc)
+            except TypeError:  # older networkx: no length_bound
+                for cyc in nx.simple_cycles(sub):
+                    if 2 <= len(cyc) <= config.MAX_CYCLE_LEN:
+                        in_cycle.update(cyc)
+        else:
+            # hub-scale SCC: flag membership (a circular flow exists
+            # through these nodes) without enumerating
+            in_cycle.update(comp)
 
-    # communities on the full undirected view (both edge families)
+    # communities on the full undirected view (both edge families);
+    # label propagation (near-linear) once the ego outgrows modularity
     full_und = nx.Graph()
     full_und.add_nodes_from(ego.nodes)
     for u, v in ego.edges():
         full_und.add_edge(u, v)
     community_risk = {}
     if full_und.number_of_edges() > 0:
-        communities = nx.algorithms.community.greedy_modularity_communities(full_und)
+        if len(full_und) > config.STAGE_D_COMMUNITY_LP_N:
+            communities = nx.algorithms.community.label_propagation_communities(full_und)
+        else:
+            communities = nx.algorithms.community.greedy_modularity_communities(full_und)
         for com in communities:
             if len(com) < config.MIN_COMMUNITY_SIZE:
                 continue
@@ -55,7 +73,14 @@ def score_structural(ego) -> None:
                 community_risk[n] = mean_base
 
     deg = nx.degree_centrality(full_und) if len(full_und) > 1 else {}
-    btw = nx.betweenness_centrality(full_und) if len(full_und) > 2 else {}
+    if len(full_und) <= 2:
+        btw = {}
+    elif len(full_und) > config.STAGE_D_BTW_EXACT_N:
+        # sampled betweenness: unbiased estimate, bounded cost on big egos
+        btw = nx.betweenness_centrality(
+            full_und, k=min(config.STAGE_D_BTW_SAMPLE, len(full_und)), seed=42)
+    else:
+        btw = nx.betweenness_centrality(full_und)
 
     for n in ego.nodes:
         comps = {

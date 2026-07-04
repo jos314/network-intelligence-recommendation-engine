@@ -14,7 +14,38 @@ PROMPT_TEMPLATE = REPO_ROOT / "prompts" / "conclusion_template.md"
 
 # ---------------------------------------------------------------- graph
 EGO_DEPTH_VIEW = 3      # on-screen graph depth (app spec)
-EGO_DEPTH_SCORE = 4     # scoring depth cap (hackathon spec)
+EGO_DEPTH_SCORE = 3     # scoring depth (hackathon brief: 2nd + 3rd degree)
+
+# -------------------------------------------- prebuilt-graph ingestion
+# The masked HBUS extract (and its synthetic twin) ships GRAPH_NODES +
+# GRAPH_EDGES pre-built, keyed on MASKED_CUSTOMER_ID ('CUS_' + 12 digits).
+# Placeholder tokens in it are NOT signal — treat as missing:
+PLACEHOLDER_ADDRESSES = {"UNKNOWN"}
+PLACEHOLDER_PHONES = {"0000000000"}
+CRR_UNKNOWN_TOKENS = {"N", "0000"}   # real tokens: L / N / 0000 / H / Low
+
+# Depth-3 egos on the full-scale graph reach ~95% of all 434k nodes (the
+# seeds are super-hubs). Scoring caps: expand each frontier node's top-K
+# counterparties by flow amount, ALWAYS retain priority neighbours
+# (alerted / PEP / high-CRR), stop at MAX nodes. Truncation is recorded on
+# the ego and disclosed in the UI + evidence pack — never silent.
+EGO_TOPK_SEED = 150      # direct counterparties kept for the case subject
+EGO_TOPK_PER_NODE = 25   # counterparties kept per further hop node
+EGO_MAX_NODES = 4000     # hard ceiling per scored network
+
+# ------------------------------------------------- UI scale caps (disclosed)
+TABLE_MAX_ROWS = 1000    # ranked counterparty table cap (top by risk)
+SEARCH_MAX_OPTIONS = 1000
+RENDER_MAX_NODES = 1200  # canvas cap per view; alerted/path/expanded always
+                         # drawn, remainder ranked by risk (caption discloses)
+
+# ------------------------------------------ Stage D scale guards
+STAGE_D_BTW_EXACT_N = 1200    # above this, sample betweenness (k nodes)
+STAGE_D_BTW_SAMPLE = 150
+STAGE_D_COMMUNITY_LP_N = 800   # above this, label propagation not modularity
+                               # (greedy modularity is O(n^2)-ish; LP is ~linear)
+CYCLE_SCC_ENUM_MAX = 60        # enumerate short cycles only in SCCs this small;
+                               # bigger SCCs are flagged by membership (linear)
 
 # ------------------------------------------------- entity resolution (§2.2)
 # A shared phone/email/address linking <= STRONG_GROUP parties is a strong
@@ -35,6 +66,8 @@ STAGE_A_WEIGHTS = {
 }
 CRR_MAP = {"HIGH": 1.0, "H": 1.0, "MEDIUM": 0.5, "MED": 0.5, "M": 0.5,
            "LOW": 0.1, "L": 0.1, "STANDARD": 0.1}
+# ('N' / '0000' are NOT ratings — cleaned to null at ingest so they count
+# as KYC-missing, per the integration brief §3.4)
 # No watchlist / World-Check source is connected yet (open Q5). While False,
 # the UI must render sanctioned counts as "not screened", NEVER as a clean 0.
 WATCHLIST_CONNECTED = False
