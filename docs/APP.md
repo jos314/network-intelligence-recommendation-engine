@@ -23,19 +23,43 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 
 ## Screen layout
 
-* **Header** — case selector, signed-in user chip, sign out, dark/light
-  toggle (☾/☀).
-* **KPI row** — decision chip, calibrated risk with gauge, alerted
-  neighbours, sanctioned/watchlist count, ego size, typology flags, LOB.
-* **Graph card** — the subject's ego-network.
-* **Side card** — entity search, "Expand next hop", node inspector with
-  risk decomposition, the node's top-20 riskiest counterparties.
-* **Why card** — exact top risk drivers (red raises, green lowers) and the
-  decision rationale.
-* **Key risk paths card** — the propagated-risk chains, shared-attribute
-  links to the subject, and download buttons (evidence pack JSON,
-  conclusion prompt MD).
-* **Table card** — every counterparty, sortable/filterable, CSV export.
+* **Header** (sticky) — case selector, signed-in user chip, sign out,
+  dark/light toggle (☾/☀).
+* **KPI row** — case decision (with an "escalated by network evidence" tag
+  when the network raised it above the subject's own band), risk gauge with
+  **threshold ticks at t1/t2** and the band caption, alerted-within-2-hops
+  count (hover lists the names), watchlist status, **activity window**,
+  **subject total flow**, scored-network size, typology flags (hover for
+  plain English), LOB.
+* **Decision rationale strip** — the reasons, in case-narrative English,
+  visible without scrolling.
+* **Graph card** — the ego-network, plus a **"showing X of Y" caption**
+  that warns when filters hide risk-relevant entities.
+* **Side card** — entity search, "Expand next hop of <entity>" / "Reset
+  expansion", and the inspector: click a **node** for KYC + flow summary +
+  risk decomposition + its top counterparties (each clickable), or click an
+  **edge** for the relationship itself — total amount, transaction count,
+  activity window, corridor (or the shared identity value).
+* **Why card** — exact top risk drivers.
+* **Key risk paths card** — propagated-risk chains, shared-attribute links,
+  download buttons (evidence pack JSON, conclusion prompt MD).
+* **Table card** — every counterparty with **type, total amount, # txns,
+  first/last seen, % of subject flow (direct counterparties only)**;
+  sortable/filterable, CSV export; **click a row to inspect it** (rows
+  beyond the depth slider are revealed in the graph automatically).
+
+## Honesty rules (what the screen refuses to fake)
+
+* **Watchlist**: with no screening source connected, the KPI reads
+  "— · not screened", never 0.
+* **Calibration**: when the calibrator fell back to identity (too few
+  labels), the gauge is labelled "Risk score (uncalibrated)" with a ⚠
+  tooltip carrying the label counts.
+* **Filters disclose**: alerted nodes are exempt from the min-risk cut, the
+  highlighted key path is force-included beyond the depth slider, and the
+  caption counts whatever remains hidden.
+* **Alert recency**: the extract carries no alert dates; every label says
+  "recency unknown" instead of implying freshness.
 
 ## Graph encodings
 
@@ -43,7 +67,8 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 |---|---|
 | node **size** | `final_risk` (bigger = riskier) |
 | node **colour** | decision: red = SAR, yellow = EDD, grey = No action |
-| red **ring** | TM-alerted in the last 3 months |
+| dashed **rectangle** | external counterparty (`PSEUDO_`) — not a bank customer, no KYC held |
+| red **ring** | has a TM alert (extract carries no dates — recency unknown) |
 | blue **diamond** | the case subject (seed) |
 | solid edge + arrow | transaction, arrow along **money flow**; thickness = amount relative to the ego's largest flow |
 | dashed blue edge | identity link (same phone / email / address) |
@@ -58,9 +83,11 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | transactions / identity links | toggle the two edge families separately |
 | live physics / force / rings by hop | layout: animated springs (drag a node and the neighbourhood re-settles, Obsidian-style) / static force / concentric rings by hop distance |
 | highlight key risk path | draws the top Stage-C path on the graph |
-| ◎ Center subject | pans/zooms onto the seed diamond and selects it |
-| Expand next hop | reveals the focused node's neighbours beyond the current depth |
-| click a node | focuses it in the inspector |
+| ◎ Center subject | pans/zooms onto the seed diamond and focuses it in the inspector |
+| Reset filters | depth 1, min risk 0, both edge families back on |
+| Expand next hop of <entity> | reveals the focused node's neighbours beyond the current depth |
+| Reset expansion | undoes all expansions without switching cases |
+| click a node / edge / table row | inspects it in the side panel (the camera stays where you put it) |
 | Search entity… | focus any node by name/id (ranked by risk) |
 
 ## Analyst workflow (per case)
@@ -77,10 +104,18 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 
 ## Implementation notes
 
-* One big render callback drives graph, KPIs, panels, and table from
-  `(case, depth, min-risk, edge kinds, layout, highlight, theme, focus,
-  expanded)`. Stores (`dcc.Store`) hold auth, theme, focus, and expansion
-  state.
+* One render callback drives graph, KPIs, cards, and table from
+  `(case, depth, min-risk, edge kinds, layout, highlight, theme, expanded)`;
+  focus (node/edge inspection) deliberately lives OUTSIDE it, in its own
+  small callbacks, so tapping never re-renders elements or steals the
+  camera. The viewport re-fits only when a `view-sig` of the real view
+  inputs changes, and layout dicts are identity-cached for the same reason.
+* Parallel transaction rows between the same pair are aggregated into one
+  drawn edge (summed amount/count, spanned dates) whose data feeds the edge
+  inspector.
+* Table filter/sort and the search box reset on case switch (analytic state
+  must not leak across investigations); depth/min-risk persist and are
+  disclosed by the caption.
 * Theming is a single CSS-variable system (`assets/style.css`) switched by
   a `className` on `#root`; Dash 4's own design tokens are remapped inside
   the same file so dcc components follow the theme. The cytoscape canvas

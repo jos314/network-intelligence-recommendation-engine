@@ -12,6 +12,25 @@ import networkx as nx
 from .. import config
 
 
+def node_flow_summary(ego: nx.MultiDiGraph, node: str) -> dict:
+    """Aggregate a node's transaction edges (both directions) within the
+    ego-network: total amount, transaction count, activity window. Feeds
+    the counterparty table, the node inspector, and the evidence pack."""
+    total, count, first, last = 0.0, 0, None, None
+    for _, _, d in list(ego.out_edges(node, data=True)) + list(ego.in_edges(node, data=True)):
+        if d.get("kind") != "txn":
+            continue
+        total += float(d.get("total_amount_base", 0.0))
+        count += int(d.get("txn_count", 0))
+        f, l = d.get("first_run_date"), d.get("last_run_date")
+        if f is not None and (first is None or f < first):
+            first = f
+        if l is not None and (last is None or l > last):
+            last = l
+    return {"total_amount": total, "txn_count": count,
+            "first_seen": first, "last_seen": last}
+
+
 def ego_network(g: nx.MultiDiGraph, seed: str, depth: int = None) -> nx.MultiDiGraph:
     if depth is None:
         depth = config.EGO_DEPTH_SCORE

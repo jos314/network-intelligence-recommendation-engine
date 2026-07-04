@@ -20,13 +20,23 @@ def test_threshold_bands():
 def test_watchlist_override_beats_low_score():
     d = node_decision(_attrs(0.05, watchlist=1.0))
     assert d["decision"] == config.DECISION_SAR
-    assert any("OVERRIDE" in r for r in d["reasons"])
+    assert any(r.startswith("Override") for r in d["reasons"])
+    # never claim "confirmed" while there is no real screening source
+    assert not any("confirmed" in r.lower() for r in d["reasons"])
 
 
 def test_alert_plus_propagation_floors_at_edd():
     d = node_decision(_attrs(0.05, alerted=True, prop=config.OVERRIDE_PROP_RISK))
     assert d["decision"] == config.DECISION_EDD
-    assert any("OVERRIDE" in r for r in d["reasons"])
+    assert any(r.startswith("Override") for r in d["reasons"])
+
+
+def test_reasons_are_case_narrative_english():
+    # no debug tokens — an investigator should be able to paste these
+    for p in (0.1, 0.5, 0.9):
+        for r in node_decision(_attrs(p))["reasons"]:
+            assert "t1=" not in r and "t2=" not in r and "p=" not in r
+            assert "ESCALATION:" not in r and "OVERRIDE:" not in r
 
 
 def test_reasons_always_documented():

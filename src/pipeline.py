@@ -68,7 +68,7 @@ def run_all_cases(depth: int = None, method: str = None, seed: int = 42,
     for cid, ego in egos.items():
         apply_calibration(ego, calibrator)
         apply_decisions(ego)
-        evidence = build_evidence_pack(ego, cid)
+        evidence = build_evidence_pack(ego, cid, calibration=calibrator.describe())
         prompt_path = write_conclusion_prompt(evidence)
         results[cid] = {"ego": ego, "evidence": evidence, "prompt_path": prompt_path}
         if verbose:

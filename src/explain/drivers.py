@@ -9,7 +9,7 @@ swap this for shap.Explainer over the same feature frame.
 from .. import config
 
 _STAGE_LABEL = {
-    "alerted": "TM alert (last 3 months)",
+    "alerted": "Has TM alert (recency unknown)",
     "watchlist_match": "Watchlist / sanctions match",
     "pep": "PEP flag",
     "crr": "High KYC risk rating (CRR)",

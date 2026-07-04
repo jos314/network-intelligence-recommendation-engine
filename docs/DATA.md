@@ -15,7 +15,7 @@ Profiled shapes from the real PoC extract:
 | `CUSTOMER_ACCOUNT_LINK` | 1,048,575 | customer ↔ account holdings |
 | `CUSTOMERS` | 398,390 | party/entity master (KYC attributes) |
 | `COUNTRY` | 272 | jurisdiction risk lookup |
-| `ALERTS` | 692 | TM alert flag (L2–L3, last 3 months) |
+| `ALERTS` | 692 | TM alert flag (L2–L3; no dates carried — recency unknown) |
 | `CASE_CUSTOMERS` | 6 | the case subjects / graph seeds |
 
 ### CUSTOMERS
@@ -51,7 +51,8 @@ Exactly 1,048,575 rows = 2²⁰−1 = Excel's row limit → possible truncation
 
 ### ALERTS
 Single column, **mixed formats**: plain ints (`576700078`) and pseudonyms
-(`PSEUDO_719247954`). Presence = triggered a TM alert in the last 3 months.
+(`PSEUDO_719247954`). Presence = the entity has triggered a TM alert. The extract carries no
+alert dates, so recency is unknown — the UI and drivers say so explicitly.
 
 ### COUNTRY
 `COUNTRY_RISK` bands observed: **HIGH / MEDIUM / STANDARD** (spec said LOW —

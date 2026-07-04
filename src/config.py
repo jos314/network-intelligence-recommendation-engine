@@ -26,7 +26,7 @@ ER_MAX_GROUP = 20
 # ------------------------------------------------------- Stage A scorecard
 # Weights sum to 1.0 so base_risk is bounded in [0, 1].
 STAGE_A_WEIGHTS = {
-    "alerted": 0.30,          # TM alert in last 3 months
+    "alerted": 0.30,          # has TM alert (ALERTS carries no dates — recency unknown)
     "watchlist_match": 0.25,  # sanctions / World-Check hit (source TBD, Q5)
     "pep": 0.15,              # PEP_FLAG == Y
     "crr": 0.15,              # KYC Customer Risk Rating band
@@ -35,6 +35,9 @@ STAGE_A_WEIGHTS = {
 }
 CRR_MAP = {"HIGH": 1.0, "H": 1.0, "MEDIUM": 0.5, "MED": 0.5, "M": 0.5,
            "LOW": 0.1, "L": 0.1, "STANDARD": 0.1}
+# No watchlist / World-Check source is connected yet (open Q5). While False,
+# the UI must render sanctioned counts as "not screened", NEVER as a clean 0.
+WATCHLIST_CONNECTED = False
 COUNTRY_RISK_MAP = {"HIGH": 1.0, "MEDIUM": 0.5, "STANDARD": 0.0, "LOW": 0.0}
 
 # ------------------------------------------------------- Stage B scorecard

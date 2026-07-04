@@ -14,29 +14,38 @@ from .. import config
 
 
 def node_decision(attrs: dict) -> dict:
-    """Decision + reasons for one node, from its calibrated score + flags."""
+    """Decision + reasons for one node, from its calibrated score + flags.
+
+    Reasons are written as case-narrative sentences (an investigator should
+    be able to paste them into a case file); the driving numbers stay in
+    parentheses for auditability."""
     p = attrs.get("final_risk", 0.0)
     reasons = []
 
     # 1 — hard overrides
     if attrs.get("base_components", {}).get("watchlist_match", 0.0) >= 1.0:
         return {"decision": config.DECISION_SAR, "p": p,
-                "reasons": ["OVERRIDE: confirmed watchlist/sanctions match"]}
+                "reasons": ["Override: watchlist/sanctions name match — SAR"]}
     floor = None
     if attrs.get("alerted") and attrs.get("prop_risk", 0.0) >= config.OVERRIDE_PROP_RISK:
         floor = config.DECISION_EDD
-        reasons.append("OVERRIDE: active TM alert with high propagated risk -> at least EDD")
+        reasons.append("Override: entity has an active TM alert and sits close to "
+                       "other high-risk entities (proximity %.2f ≥ %.2f) — at least EDD"
+                       % (attrs.get("prop_risk", 0.0), config.OVERRIDE_PROP_RISK))
 
     # 2 — threshold bands
     if p >= config.DECISION_T2:
         band = config.DECISION_SAR
-        reasons.append("calibrated p=%.2f >= t2=%.2f" % (p, config.DECISION_T2))
+        reasons.append("Risk score %.2f is at or above the SAR threshold (%.2f)"
+                       % (p, config.DECISION_T2))
     elif p >= config.DECISION_T1:
         band = config.DECISION_EDD
-        reasons.append("t1=%.2f <= calibrated p=%.2f < t2=%.2f" % (config.DECISION_T1, p, config.DECISION_T2))
+        reasons.append("Risk score %.2f falls in the enhanced-due-diligence band "
+                       "(%.2f–%.2f)" % (p, config.DECISION_T1, config.DECISION_T2))
     else:
         band = config.DECISION_NO_ACTION
-        reasons.append("calibrated p=%.2f < t1=%.2f" % (p, config.DECISION_T1))
+        reasons.append("Risk score %.2f is below the EDD threshold (%.2f)"
+                       % (p, config.DECISION_T1))
 
     order = [config.DECISION_NO_ACTION, config.DECISION_EDD, config.DECISION_SAR]
     if floor and order.index(band) < order.index(floor):
@@ -49,6 +58,13 @@ def apply_decisions(ego) -> None:
         d = node_decision(attrs)
         ego.nodes[n]["decision"] = d["decision"]
         ego.nodes[n]["decision_reasons"] = d["reasons"]
+
+
+def _names(ego, nodes, limit=3) -> str:
+    """Human list of entity names for a reason sentence."""
+    labels = [ego.nodes[n].get("name") or n for n in nodes[:limit]]
+    extra = len(nodes) - len(labels)
+    return ", ".join(labels) + (" and %d more" % extra if extra > 0 else "")
 
 
 def case_decision(ego) -> dict:
@@ -68,16 +84,19 @@ def case_decision(ego) -> dict:
 
     if sanctioned and order.index(band) < order.index(config.DECISION_SAR):
         band = config.DECISION_SAR
-        reasons.append("ESCALATION: sanctioned/watchlisted entity in the network (%d)" % len(sanctioned))
+        reasons.append("Escalated to SAR: watchlisted entity in the network (%s)"
+                       % _names(ego, sanctioned))
     if len(alerted_close) >= 2 and order.index(band) < order.index(config.DECISION_EDD):
         band = config.DECISION_EDD
-        reasons.append("ESCALATION: %d alerted counterparties within 2 hops" % len(alerted_close))
+        reasons.append("Escalated to EDD: %d alerted counterparties within 2 hops (%s)"
+                       % (len(alerted_close), _names(ego, alerted_close)))
     subject_prop = subject.get("prop_risk", 0.0)
     if (alerted_close and subject_prop >= config.CASE_PROP_ESCALATION
             and order.index(band) < order.index(config.DECISION_EDD)):
         band = config.DECISION_EDD
-        reasons.append("ESCALATION: subject strongly connected to alerted entities "
-                       "(prop_risk=%.2f >= %.2f)" % (subject_prop, config.CASE_PROP_ESCALATION))
+        reasons.append("Escalated to EDD: subject is strongly connected to alerted "
+                       "counterparty %s (network proximity %.2f ≥ %.2f)"
+                       % (_names(ego, alerted_close), subject_prop, config.CASE_PROP_ESCALATION))
 
     return {
         "decision": band,
