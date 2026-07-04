@@ -30,6 +30,7 @@ from dash.exceptions import PreventUpdate
 from .. import config
 from ..explain.paths import key_paths
 from ..pipeline import run_all_cases
+from .auth import verify_credentials
 
 
 # ------------------------------------------------- cytoscape-side palette
@@ -405,22 +406,48 @@ LEGEND = html.Div([
 
 
 # ------------------------------------------------------------------- app
-app = dash.Dash(__name__, title="Network Intelligence — Counterparty Risk")
+# suppress_callback_exceptions: the login view and the main screen are
+# rendered alternately into #page, so at any moment half the callback
+# targets are legitimately absent from the layout.
+app = dash.Dash(__name__, title="Network Intelligence — Counterparty Risk",
+                suppress_callback_exceptions=True)
 
 _case_options = [
     {"label": "Case %d — %s (%s)" % (c, RUN["results"][c]["evidence"]["subject_name"],
                                      RUN["results"][c]["evidence"]["lob"] or "?"),
      "value": c} for c in CASES]
 
-app.layout = html.Div(id="root", className="theme-light", children=[
-    html.Div([
-        html.H2(["Counterparty Network Risk",
-                 html.Span("staged scorecard · %s propagation"
-                           % config.PROP_METHOD.upper(), className="sub")]),
-        dcc.Dropdown(id="case", options=_case_options, value=CASES[0],
-                     clearable=False, style={"width": "340px"}),
-        html.Button("☾ / ☀", id="theme-btn", className="btn", n_clicks=0),
-    ], className="header"),
+
+def _login_view():
+    return html.Div(html.Div([
+        html.Div("◆", className="login-mark"),
+        html.H2("Counterparty Network Risk", style={"margin": "0 0 2px",
+                                                    "fontSize": "18px"}),
+        html.Div("Sign in to open the analyst workspace",
+                 style={"color": "var(--muted)", "fontSize": "12.5px",
+                        "marginBottom": "18px"}),
+        dcc.Input(id="login-user", placeholder="Username", type="text",
+                  className="login-input", autoFocus=True),
+        dcc.Input(id="login-pass", placeholder="Password", type="password",
+                  className="login-input", n_submit=0),
+        html.Button("Sign in", id="login-btn", n_clicks=0,
+                    className="btn btn-primary login-btn"),
+        html.Div(id="login-error", className="login-error"),
+    ], className="login-card card"), className="login-wrap")
+
+
+def _main_layout(user):
+    return html.Div([
+        html.Div([
+            html.H2(["Counterparty Network Risk",
+                     html.Span("staged scorecard · %s propagation"
+                               % config.PROP_METHOD.upper(), className="sub")]),
+            dcc.Dropdown(id="case", options=_case_options, value=CASES[0],
+                         clearable=False, style={"width": "340px"}),
+            html.Span("◈ %s" % user, className="user-chip"),
+            html.Button("Sign out", id="logout-btn", className="btn", n_clicks=0),
+            html.Button("☾ / ☀", id="theme-btn", className="btn", n_clicks=0),
+        ], className="header"),
     html.Div(id="kpi-row", className="kpi-row"),
     html.Div([
         html.Div([
@@ -489,13 +516,55 @@ app.layout = html.Div(id="root", className="theme-light", children=[
                              filter_action="native", page_size=12,
                              export_format="csv", **_table_styles()),
     ], className="card", style={"marginTop": "12px"}),
-    dcc.Store(id="theme-store", data="light"),
-    dcc.Store(id="focus-store"),
-    dcc.Store(id="expanded-store", data=[]),
-    dcc.Store(id="center-op"),
-    dcc.Store(id="fit-op"),
-    dcc.Download(id="download"),
+        dcc.Store(id="theme-store", data="light"),
+        dcc.Store(id="focus-store"),
+        dcc.Store(id="expanded-store", data=[]),
+        dcc.Store(id="center-op"),
+        dcc.Store(id="fit-op"),
+        dcc.Download(id="download"),
+    ])
+
+
+# #root (theme scope) always exists; #page swaps between login and workspace.
+# auth-store uses session storage: the login survives a browser refresh but
+# not closing the tab — good enough for the placeholder gate.
+app.layout = html.Div(id="root", className="theme-light", children=[
+    dcc.Store(id="auth-store", storage_type="session"),
+    html.Div(id="page"),
 ])
+
+
+@app.callback(Output("page", "children"), Input("auth-store", "data"))
+def _route(auth):
+    if auth and auth.get("user"):
+        return _main_layout(auth["user"])
+    return _login_view()
+
+
+@app.callback(
+    Output("auth-store", "data"), Output("login-error", "children"),
+    Input("login-btn", "n_clicks"), Input("login-pass", "n_submit"),
+    State("login-user", "value"), State("login-pass", "value"),
+    prevent_initial_call=True,
+)
+def _login(n_clicks, n_submit, user, password):
+    ctx = dash.callback_context
+    if not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate  # component (re)creation, not a real attempt
+    if verify_credentials(user, password):
+        return {"user": str(user).strip()}, ""
+    return dash.no_update, "Invalid username or password."
+
+
+@app.callback(
+    Output("auth-store", "data", allow_duplicate=True),
+    Input("logout-btn", "n_clicks"), prevent_initial_call=True,
+)
+def _logout(n):
+    ctx = dash.callback_context
+    if not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
+    return None
 
 # Find the live cytoscape instance — cytoscape.js registers itself (_cyreg)
 # on the container div, which is the #graph element itself; fall back to a

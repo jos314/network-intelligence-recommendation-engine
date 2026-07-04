@@ -7,7 +7,16 @@ transparent staged pipeline, turns the calibrated score into one of
 **{No action, EDD, SAR}**, explains the drivers, and writes a grounded LLM
 prompt file for the case conclusion.
 
-Design doc: the vault note *Build Plan — App Architecture & Algorithms*
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | system overview, runtimes, module map, tech stack, extension seams |
+| [docs/DATA.md](docs/DATA.md) | the six tables, ID crosswalk, entity resolution, switching to real data |
+| [docs/SCORING.md](docs/SCORING.md) | stages A–H, weights, calibration, decision layer, governance |
+| [docs/APP.md](docs/APP.md) | login, screen guide, graph encodings, analyst workflow |
+
+Design origin: the vault note *Build Plan — App Architecture & Algorithms*
 (Obsidian, `Projects/AI-Enabled Network Intelligence & Recommendation Engine/`).
 
 ## Quick start
@@ -26,6 +35,11 @@ python3 -m venv .venv
 # the analyst app (http://127.0.0.1:8050)
 .venv/bin/python -m src.app.app
 ```
+
+**Login:** demo credentials are `analyst` / `riskdemo` until you create
+`data/users.json` or set `NIRE_USER` / `NIRE_PASSWORD` — see
+[docs/APP.md](docs/APP.md#login). The auth module
+(`src/app/auth.py`) is a deliberate placeholder seam for SSO/LDAP.
 
 ## Real data
 

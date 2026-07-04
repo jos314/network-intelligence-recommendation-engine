@@ -133,3 +133,25 @@ h5.section { margin: 10px 0 4px; font-size: 12px; font-weight: 650; color: var(-
 }
 
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+/* Login gate */
+.login-wrap {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.login-card { width: 340px; padding: 28px 26px; text-align: center; }
+.login-mark { font-size: 30px; color: var(--accent); margin-bottom: 8px; }
+.login-input {
+  display: block; width: 100%; box-sizing: border-box; margin-bottom: 10px;
+  padding: 9px 12px; font-size: 13px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  outline: none;
+}
+.login-input:focus { border-color: var(--accent); }
+.login-btn { width: 100%; padding: 9px 12px; font-size: 13px; margin-top: 4px; }
+.login-error { color: var(--risk-red); font-size: 12px; min-height: 18px; margin-top: 10px; }
+
+.user-chip {
+  color: var(--muted); font-size: 12.5px; padding: 5px 10px;
+  border: 1px solid var(--border); border-radius: 999px; background: var(--panel);
+}
