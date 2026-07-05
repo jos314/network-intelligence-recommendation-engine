@@ -25,6 +25,7 @@ return, so dropping the real tables into data/ changes every element here.
 Run:  .venv/bin/python -m src.app.app   (then open http://127.0.0.1:8050)
 """
 import json
+import math
 import os
 import re
 
@@ -156,12 +157,6 @@ def _stylesheet(theme):
     ]
 
 
-# One physics recipe shared by the Python layout prop and the drag-release
-# handler injected below (kept in sync by construction).
-_LIVE_PHYSICS = {"name": "cose", "animate": True, "randomize": False,
-                 "nodeRepulsion": 12000, "idealEdgeLength": 80,
-                 "numIter": 400, "padding": 24}
-
 # Layout dicts are cached so an unchanged (mode, seed) returns the SAME
 # object — otherwise every render hands cytoscape a "new" layout and the
 # graph re-springs on theme flips and focus taps (camera-stability item).
@@ -177,8 +172,12 @@ def _layout_spec(mode, seed):
         elif mode == "force":  # static: compute once, no motion
             spec = {"name": "cose", "animate": False, "nodeRepulsion": 12000,
                     "idealEdgeLength": 80, "padding": 24}
-        else:  # "live" (default): animated physics + spring-on-release
-            spec = dict(_LIVE_PHYSICS, fit=True)
+        else:
+            # "live" (default): PRESET — cytoscape never runs a layout.
+            # Nodes are placed from the server's deterministic hints and a
+            # continuous clientside force simulation (Obsidian-style) keeps
+            # them settled; nothing ever reshuffles or randomizes.
+            spec = {"name": "preset", "fit": False, "animate": False}
         _LAYOUT_CACHE[key] = spec
     return _LAYOUT_CACHE[key]
 
@@ -271,7 +270,7 @@ def _cluster_groups(ego):
 
 
 def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
-              highlight=False, mode="entities"):
+              highlight=False, mode="entities", isolate=False):
     """Graph elements + disclosure stats for the drill-down view model.
 
     entities mode: subject + its TOP-N riskiest direct counterparties;
@@ -280,9 +279,18 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     the visible set are exempt from the min-risk cut, and everything hidden
     is counted in `stats` — never silently dropped.
 
+    isolate=True (with expansions present) switches to the expansion lens:
+    only subject + drilled parents + revealed children + the lower-depth
+    nodes those children connect back to. Cross-links between different
+    expansions render whenever both endpoints are visible.
+
     clusters mode: one node per Stage-D community (plus the subject and an
     "unclustered" bucket), edges = aggregated flows between groups — the
     broad view of the case.
+
+    Every node carries deterministic placement hints (x0/y0; phint/kidx for
+    expansion children) so the live-physics view never reshuffles: hop-1
+    sits on a ring, children bloom out of their parent.
 
     Returns (elements, stats).
     """
@@ -308,19 +316,35 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
 
     visible, hidden_flagged = set(), 0
     path_revealed = 0
-    for n in baseline:
-        if n not in ego.nodes:
-            continue
-        a = ego.nodes[n]
-        forced = n == seed or n in expanded or n in path_nodes
-        if a.get("final_risk", 0.0) < min_risk and not (forced or a.get("alerted")):
-            if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
-                hidden_flagged += 1
-            continue
-        if n in path_nodes and n not in expanded and n != seed \
-                and n not in top_hop1:
-            path_revealed += 1
-        visible.add(n)
+    isolated = bool(isolate) and bool(expanded)
+    if isolated:
+        # the expansion lens: subject + drilled parents + revealed children
+        # + the already-visible lower-depth nodes those children connect
+        # back to (n(2,3)-n(1,15), n(2,4)-n(0,1) style back-links)
+        core = {seed} | expanded | {p for p in parents.values() if p in ego.nodes}
+        top_set = set(top_hop1)
+        back_links = set()
+        for child in expanded:
+            if child not in ego.nodes:
+                continue
+            for nb in set(ego.successors(child)) | set(ego.predecessors(child)):
+                if nb in top_set or nb == seed:
+                    back_links.add(nb)
+        visible = {n for n in core | back_links if n in ego.nodes}
+    else:
+        for n in baseline:
+            if n not in ego.nodes:
+                continue
+            a = ego.nodes[n]
+            forced = n == seed or n in expanded or n in path_nodes
+            if a.get("final_risk", 0.0) < min_risk and not (forced or a.get("alerted")):
+                if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
+                    hidden_flagged += 1
+                continue
+            if n in path_nodes and n not in expanded and n != seed \
+                    and n not in top_hop1:
+                path_revealed += 1
+            visible.add(n)
 
     alerted_offscreen = sum(1 for n, a in ego.nodes(data=True)
                             if a.get("alerted") and n not in visible)
@@ -338,28 +362,71 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         render_capped = len(rest) - budget
         visible = must | set(rest[:budget])
 
+    # -------- deterministic placement hints (no reshuffle, ever) --------
+    # seed at origin; hop-1 on a risk-ranked ring; expansion children fan
+    # outward from their parent's hint; parentless reveals on outer rings.
+    hints, kidx = {seed: (0.0, 0.0)}, {}
+    ring_n = max(len(top_hop1), 1)
+    for i, n in enumerate(top_hop1):
+        ang = 2 * math.pi * i / ring_n - math.pi / 2
+        hints[n] = (300 * math.cos(ang), 300 * math.sin(ang))
+    fan_count = {}
+    for child in sorted(expanded,
+                        key=lambda c: ego.nodes[c].get("hop", 9) if c in ego.nodes else 9):
+        if child in hints or child not in ego.nodes:
+            continue
+        parent = parents.get(child)
+        hop = ego.nodes[child].get("hop", 2)
+        if parent in hints:
+            px, py = hints[parent]
+            base_ang = math.atan2(py, px) if (px, py) != (0.0, 0.0) else 0.0
+            k = fan_count.get(parent, 0)
+            fan_count[parent] = k + 1
+            kidx[child] = k
+            ang = base_ang + ((k % 7) - 3) * 0.33
+            r = 130 + 40 * (k // 7)
+            hints[child] = (px + r * math.cos(ang), py + r * math.sin(ang))
+        else:  # revealed without a drill (table click): stable outer ring
+            ang = (sum(ord(c) for c in child) % 360) * math.pi / 180
+            r = 300 + 170 * max(hop - 1, 1)
+            hints[child] = (r * math.cos(ang), r * math.sin(ang))
+
     els = []
     for n in visible:
         a = ego.nodes[n]
         classes = []
         if n in path_nodes:
             classes.append("onpath")
-        els.append({"data": {
+        if n not in hints:  # e.g. back-link nodes in isolate mode
+            ang = (sum(ord(c) for c in n) % 360) * math.pi / 180
+            hints[n] = (430 * math.cos(ang), 430 * math.sin(ang))
+        hx, hy = hints[n]
+        data = {
             "id": n, "label": _node_label(n, a),
             "name": a.get("name") or _short(n),
             "risk": round(a.get("final_risk", 0.0), 3),
             "decision": a.get("decision", config.DECISION_NO_ACTION),
             "alerted": bool(a.get("alerted")), "is_seed": n == seed,
             "hop": a.get("hop"), "node_type": a.get("node_type"),
-        }, "classes": " ".join(classes)})
+            "x0": round(hx, 1), "y0": round(hy, 1),
+        }
+        if n in parents and parents[n] in visible:
+            data["phint"] = parents[n]
+            data["kidx"] = kidx.get(n, 0)
+        els.append({"data": data, "classes": " ".join(classes)})
 
     # aggregate parallel edges: txn per (u, v); identity per (u, v, kind)
+    lens_core = ({seed} | expanded | set(parents.values())) if isolated else None
     txn_groups, ident_groups, total_groups = {}, {}, set()
     for u, v, d in ego.edges(data=True):
         kind = d.get("kind")
         gkey = (u, v) if kind == "txn" else (u, v, kind)
         total_groups.add((kind == "txn", gkey))
         if u not in visible or v not in visible:
+            continue
+        # the isolate lens draws only expansion-relevant edges — links
+        # among the back-link nodes themselves are the old clutter
+        if lens_core is not None and u not in lens_core and v not in lens_core:
             continue
         family = "txn" if kind == "txn" else "identity"
         if family not in edge_kinds:
@@ -404,7 +471,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
                     "classes": "treeedge" if frozenset((u, v)) in tree_pairs else ""})
 
     stats = {
-        "mode": "entities",
+        "mode": "entities", "isolated": isolated,
         "nodes_shown": len(visible), "nodes_total": ego.number_of_nodes(),
         "edges_shown": len(txn_groups) + len(ident_groups),
         "edges_total": len(total_groups),
@@ -1053,6 +1120,13 @@ def _graph_caption(stats, ego):
                                    "'unclustered'" % format(stats["unclustered"], ",")))
         return parts
 
+    if stats.get("isolated"):
+        # the lens hides on purpose — keep the caption to what it shows
+        return [html.Span(
+            "isolated expansion view: %d nodes — drilled parents, revealed "
+            "children, and the earlier-hop nodes they connect back to "
+            "(untick to return to the full view)"
+            % stats["nodes_shown"], className="caption-note")]
     parts = [html.Span(
         "top %d of %s direct counterparties by risk"
         % (stats["hop1_shown"], format(stats["hop1_total"], ","))
@@ -1267,6 +1341,10 @@ def _main_layout(user):
                     dcc.Checklist(id="highlight-path",
                                   options=[{"label": " key risk path",
                                             "value": "on"}], value=[], inline=True),
+                    dcc.Checklist(id="isolate-exp",
+                                  options=[{"label": " isolate expansions",
+                                            "value": "on"}], value=[], inline=True,
+                                  className="ctl-tip"),
                     html.Button("◎ Center subject", id="center-btn", className="btn",
                                 n_clicks=0),
                     html.Button("Reset view", id="reset-view-btn",
@@ -1432,34 +1510,135 @@ app.clientside_callback(
 
 # Fit ONLY when the view meaningfully changes (case/filters/layout/expansion),
 # never on focus taps or theme flips — the analyst's camera position is
-# investigative state and must not be stolen. Also attaches (once per
-# instance) the Obsidian-style spring-on-release drag handler.
-_JS_SPRING = json.dumps(dict(_LIVE_PHYSICS, fit=False))
+# investigative state and must not be stolen. Also: deterministic placement
+# of newly-arrived nodes (near their drill parent, else the server hint)
+# and the continuous Obsidian-style force simulation for "live" mode —
+# springs + repulsion + overlap push acting on CURRENT positions, so the
+# graph relaxes smoothly and NEVER reshuffles or randomizes.
 app.clientside_callback(
     """
     function(sig) {
         setTimeout(function () {
             %s
             if (!cy) { return; }
-            if (cy.nodes().length) { cy.resize(); cy.fit(undefined, 40); }
-            if (!cy.__springAttached) {
-                cy.__springAttached = true;
-                cy.on('grab', 'node', function (e) {
-                    e.target.__grabPos = Object.assign({}, e.target.position());
-                });
-                cy.on('free', 'node', function (e) {
-                    const mode = document.querySelector(
-                        '#layout-mode input:checked');
-                    if (!mode || mode.value !== 'live') { return; }
-                    const p = e.target.position(), g = e.target.__grabPos;
-                    if (g && Math.hypot(p.x - g.x, p.y - g.y) > 8) {
-                        // settle ONLY the local neighbourhood — re-running
-                        // the whole layout on every drag felt clumsy
-                        e.target.closedNeighborhood().layout(
-                            Object.assign(%s, {numIter: 150,
-                                               animationDuration: 350})).run();
+
+            // ---- place nodes the client hasn't seen yet -----------------
+            const placed = cy.scratch('_placed') || {};
+            let newNodes = 0;
+            cy.nodes().forEach(function (n) {
+                if (placed[n.id()]) { return; }
+                let p = null;
+                const ph = n.data('phint');
+                if (ph) {  // bloom out of the parent's LIVE position
+                    const par = cy.getElementById(ph);
+                    if (par.length && placed[par.id()]) {
+                        const pp = par.position();
+                        const seed = cy.nodes('[?is_seed]');
+                        const sp = seed.length ? seed.position() : {x: 0, y: 0};
+                        const base = Math.atan2(pp.y - sp.y, pp.x - sp.x) || 0;
+                        const k = n.data('kidx') || 0;
+                        const ang = base + ((k %% 7) - 3) * 0.33;
+                        const r = 130 + 40 * Math.floor(k / 7);
+                        p = {x: pp.x + r * Math.cos(ang),
+                             y: pp.y + r * Math.sin(ang)};
                     }
-                });
+                }
+                if (!p && typeof n.data('x0') === 'number') {
+                    p = {x: n.data('x0'), y: n.data('y0')};
+                }
+                if (p) { n.position(p); }
+                placed[n.id()] = true;
+                newNodes++;
+            });
+            cy.scratch('_placed', placed);
+
+            if (cy.nodes().length) { cy.resize(); cy.fit(undefined, 40); }
+
+            // ---- continuous force simulation (live mode only) -----------
+            if (!cy.__sim) {
+                const sim = {alpha: 0, running: false, vel: {}};
+                cy.__sim = sim;
+                const liveOn = function () {
+                    const m = document.querySelector('#layout-mode input:checked');
+                    return m && m.value === 'live'
+                        && cy.nodes('[?is_cluster]').length === 0
+                        && cy.nodes().length > 1 && cy.nodes().length <= 500;
+                };
+                const tick = function () {
+                    if (!sim.running) { return; }
+                    if (!liveOn() || sim.alpha < 0.004) {
+                        sim.running = false; return;
+                    }
+                    const nodes = cy.nodes().toArray();
+                    const pos = {}, force = {};
+                    nodes.forEach(function (n) {
+                        pos[n.id()] = n.position();
+                        force[n.id()] = {x: 0, y: 0};
+                    });
+                    // pairwise repulsion + hard overlap push
+                    for (let i = 0; i < nodes.length; i++) {
+                        for (let j = i + 1; j < nodes.length; j++) {
+                            const a = nodes[i], b = nodes[j];
+                            const pa = pos[a.id()], pb = pos[b.id()];
+                            let dx = pa.x - pb.x, dy = pa.y - pb.y;
+                            let d2 = dx * dx + dy * dy;
+                            if (d2 < 0.01) { dx = 0.1 * (i - j); dy = 0.1; d2 = dx * dx + dy * dy; }
+                            const d = Math.sqrt(d2);
+                            let rep = 5200 / d2;
+                            const minD = a.width() / 2 + b.width() / 2 + 16;
+                            if (d < minD) { rep += (minD - d) * 2.2 / d; }
+                            const fx = dx / d * rep, fy = dy / d * rep;
+                            force[a.id()].x += fx; force[a.id()].y += fy;
+                            force[b.id()].x -= fx; force[b.id()].y -= fy;
+                        }
+                    }
+                    // springs along edges
+                    cy.edges().forEach(function (e) {
+                        const s = e.source().id(), t = e.target().id();
+                        if (!pos[s] || !pos[t] || s === t) { return; }
+                        let dx = pos[t].x - pos[s].x, dy = pos[t].y - pos[s].y;
+                        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+                        const F = 0.05 * (d - 95);
+                        const fx = dx / d * F, fy = dy / d * F;
+                        force[s].x += fx; force[s].y += fy;
+                        force[t].x -= fx; force[t].y -= fy;
+                    });
+                    // weak gravity toward the centroid (keeps it together,
+                    // lets the whole graph follow a dragged subject)
+                    let cx = 0, cy_ = 0;
+                    nodes.forEach(function (n) { cx += pos[n.id()].x; cy_ += pos[n.id()].y; });
+                    cx /= nodes.length; cy_ /= nodes.length;
+                    cy.startBatch();
+                    nodes.forEach(function (n) {
+                        if (n.grabbed()) { sim.vel[n.id()] = {x: 0, y: 0}; return; }
+                        const f = force[n.id()];
+                        f.x += (cx - pos[n.id()].x) * 0.002;
+                        f.y += (cy_ - pos[n.id()].y) * 0.002;
+                        const v = sim.vel[n.id()] || {x: 0, y: 0};
+                        v.x = (v.x + f.x * sim.alpha * 0.02) * 0.86;
+                        v.y = (v.y + f.y * sim.alpha * 0.02) * 0.86;
+                        sim.vel[n.id()] = v;
+                        n.position({x: pos[n.id()].x + v.x, y: pos[n.id()].y + v.y});
+                    });
+                    cy.endBatch();
+                    sim.alpha *= 0.99;
+                    requestAnimationFrame(tick);
+                };
+                sim.kick = function (a) {
+                    if (!liveOn()) { return; }
+                    sim.alpha = Math.max(sim.alpha, a);
+                    if (!sim.running) { sim.running = true; requestAnimationFrame(tick); }
+                };
+                // dragging keeps the sim warm so neighbours follow live
+                cy.on('grab', 'node', function () { sim.kick(0.5); });
+                cy.on('drag', 'node', function () { sim.kick(0.35); });
+                cy.on('free', 'node', function () { sim.kick(0.3); });
+            }
+            if (newNodes) { cy.__sim.kick(0.9); } else { cy.__sim.kick(0.5); }
+
+            // ---- one-time interaction handlers ---------------------------
+            if (!cy.__handlersAttached) {
+                cy.__handlersAttached = true;
                 // drill-down: double-click a node to reveal ITS top
                 // counterparties (next hop); clusters don't expand
                 cy.on('dbltap', 'node', function (e) {
@@ -1478,10 +1657,10 @@ app.clientside_callback(
                     }
                 });
             }
-        }, 650);
+        }, 400);
         return window.dash_clientside.no_update;
     }
-    """ % (_JS_FIND_CY, _JS_SPRING),
+    """ % _JS_FIND_CY,
     Output("fit-op", "data"), Input("view-sig", "data"),
 )
 
@@ -1670,7 +1849,7 @@ def _cluster_jump_switches_view(clicks):
 @app.callback(
     Output("view-mode", "value"), Output("top-n", "value"),
     Output("min-risk", "value"), Output("edge-kinds", "value"),
-    Output("highlight-path", "value"),
+    Output("highlight-path", "value"), Output("isolate-exp", "value"),
     Output("expanded-store", "data", allow_duplicate=True),
     Input("reset-view-btn", "n_clicks"), prevent_initial_call=True,
 )
@@ -1678,7 +1857,8 @@ def _reset_view(n):
     ctx = dash.callback_context
     if not ctx.triggered or not ctx.triggered[0]["value"]:
         raise PreventUpdate
-    return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"], [], {})
+    return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"],
+            [], [], {})
 
 
 @app.callback(
@@ -1718,15 +1898,17 @@ def _conclusion_actions(n_refresh, n_save, text, case_id, bump):
     Input("edge-kinds", "value"), Input("layout-mode", "value"),
     Input("highlight-path", "value"), Input("theme-store", "data"),
     Input("expanded-store", "data"), Input("view-mode", "value"),
+    Input("isolate-exp", "value"),
 )
 def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
-            theme, expanded, view_mode):
+            theme, expanded, view_mode, isolate):
     r = _result(case_id)
     ev = r["evidence"]
     els, stats = _elements(case_id, top_n or config.TOP_N_DEFAULT, min_risk,
                            edge_kinds or [], expanded,
                            highlight=bool(highlight),
-                           mode=view_mode or "entities")
+                           mode=view_mode or "entities",
+                           isolate=bool(isolate))
     ranked_nodes = sorted(r["ego"].nodes(data=True),
                           key=lambda t: t[1].get("final_risk", 0), reverse=True)
     search_opts = [{"label": "%s (%s)" % (a.get("name") or _display_id(n, a),
@@ -1745,8 +1927,13 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
 
     view_sig = json.dumps([case_id, top_n, min_risk, sorted(edge_kinds or []),
                            layout_mode, sorted(expanded or []),
-                           bool(highlight), view_mode])
-    return (els, _stylesheet(theme), _layout_spec(layout_mode, ev["subject_id"]),
+                           bool(highlight), view_mode, bool(isolate)])
+    # cluster mode always uses the static force layout — the live physics
+    # simulation only makes sense for entity nodes with placement hints
+    layout = (_layout_spec("force", ev["subject_id"])
+              if (view_mode or "entities") == "clusters"
+              else _layout_spec(layout_mode, ev["subject_id"]))
+    return (els, _stylesheet(theme), layout,
             _decision_panel(case_id, ev), _quickstats_panel(ev),
             _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,

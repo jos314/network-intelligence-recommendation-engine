@@ -12,11 +12,12 @@ from src.app.app import (CASES, DA, _apply_filters, _conclusion_content,
 def _render_case(case_id, **over):
     args = dict(top_n=config.TOP_N_DEFAULT, min_risk=0.0,
                 edge_kinds=["txn", "identity"], layout_mode="force",
-                highlight=[], theme="dark", expanded=[], view_mode="entities")
+                highlight=[], theme="dark", expanded=[], view_mode="entities",
+                isolate=[])
     args.update(over)
     return _render(case_id, args["top_n"], args["min_risk"], args["edge_kinds"],
                    args["layout_mode"], args["highlight"], args["theme"],
-                   args["expanded"], args["view_mode"])
+                   args["expanded"], args["view_mode"], args["isolate"])
 
 
 @pytest.mark.parametrize("case_id", CASES)
@@ -67,6 +68,55 @@ def test_expansion_reveals_deeper_hops():
     ids = {e["data"]["id"] for e in els if "source" not in e["data"]}
     assert set(beyond) <= ids
     assert stats["expanded_shown"] == len(beyond)
+
+
+def test_placement_hints_deterministic():
+    """Every node carries x0/y0; expansion children carry phint/kidx —
+    the no-reshuffle contract for the live-physics view."""
+    els1, _ = _elements(1, 25, 0.0, ["txn", "identity"])
+    els2, _ = _elements(1, 25, 0.0, ["txn", "identity"])
+    n1 = {e["data"]["id"]: (e["data"]["x0"], e["data"]["y0"])
+          for e in els1 if "source" not in e["data"]}
+    n2 = {e["data"]["id"]: (e["data"]["x0"], e["data"]["y0"])
+          for e in els2 if "source" not in e["data"]}
+    assert n1 == n2  # identical across calls — deterministic
+    ego = _result(1)["ego"]
+    seed = ego.graph["seed"]
+    assert n1[seed] == (0.0, 0.0)
+
+
+def test_isolate_expansion_lens():
+    """Isolate shows subject + parents + children + back-link nodes only."""
+    for cid in CASES:
+        ego = _result(cid)["ego"]
+        pair = None
+        for u, v, d in ego.edges(data=True):
+            hu, hv = ego.nodes[u].get("hop"), ego.nodes[v].get("hop")
+            if {hu, hv} == {1, 2}:
+                pair = (u, v) if hu == 1 else (v, u)
+                break
+        if not pair:
+            continue
+        parent, child = pair
+        seed = ego.graph["seed"]
+        els, stats = _elements(cid, 25, 0.0, ["txn", "identity"],
+                               expanded={child: parent, parent: None},
+                               isolate=True)
+        assert stats["isolated"]
+        ids = {e["data"]["id"] for e in els if "source" not in e["data"]}
+        assert {seed, parent, child} <= ids
+        # nothing outside the lens: every visible node is core or back-link
+        core = {seed, parent, child}
+        for n in ids - core:
+            nbrs = set(ego.successors(child)) | set(ego.predecessors(child)) \
+                | set(ego.successors(parent)) | set(ego.predecessors(parent))
+            assert n in nbrs or ego.nodes[n].get("hop") == 1
+        # isolate off -> normal view is a superset
+        els_full, stats_full = _elements(cid, 25, 0.0, ["txn", "identity"],
+                                         expanded={child: parent, parent: None})
+        assert not stats_full["isolated"]
+        return
+    pytest.skip("no hop1-hop2 adjacency in fixture egos")
 
 
 def test_expansion_tree_edges_marked():
@@ -135,8 +185,11 @@ def test_parallel_txn_edges_aggregate():
 
 
 def test_layout_modes_and_identity_cache():
+    # live = preset: cytoscape never runs a layout — placement comes from
+    # server hints + the clientside force simulation (no reshuffle ever)
     live = _layout_spec("live", "X")
-    assert live["name"] == "cose" and live["animate"]
+    assert live["name"] == "preset" and not live["fit"]
+    assert _layout_spec("force", "X")["name"] == "cose"
     assert _layout_spec("live", "X") is live  # camera-stability cache
 
 

@@ -85,6 +85,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | Control | What it does |
 |---|---|
 | entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view) |
+| isolate expansions | the expansion lens: only subject + drilled parents + revealed children + the earlier-hop nodes they connect back to; only expansion-relevant edges draw |
 | Show top (10/25/50/100) | how many of the subject's riskiest DIRECT counterparties form the baseline view |
 | Min risk | live-filters the view while dragging |
 | **double-click a node** | reveals that node's own top-K riskiest counterparties (next hop, down to 3) — the core drill-down gesture |
@@ -92,7 +93,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | key risk path | force-draws the top Stage-C path |
 | ◎ Center subject | pans/zooms onto the seed diamond and focuses it |
 | Reset view | entities mode, top 25, min risk 0, no expansions |
-| Advanced | edge-family toggles and layout modes (live physics / force / rings) |
+| Advanced | edge-family toggles and layout modes. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (hop-1 ring, children bloom from their parent) — dragging tugs springs, nothing ever reshuffles; **force** = static; **rings** = concentric by hop |
 | click a node / edge / cluster / table row | inspects it (the camera never moves on click) |
 | Search entity… | focus any scored node by name/id |
 
