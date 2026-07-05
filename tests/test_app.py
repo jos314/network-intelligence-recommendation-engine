@@ -69,6 +69,30 @@ def test_expansion_reveals_deeper_hops():
     assert stats["expanded_shown"] == len(beyond)
 
 
+def test_expansion_tree_edges_marked():
+    """A parented expansion ({child: parent}) draws the drill trail."""
+    for cid in CASES:
+        ego = _result(cid)["ego"]
+        pair = None
+        for u, v, d in ego.edges(data=True):
+            hu, hv = ego.nodes[u].get("hop"), ego.nodes[v].get("hop")
+            if {hu, hv} == {1, 2}:
+                pair = (u, v) if hu == 1 else (v, u)
+                break
+        if not pair:
+            continue
+        parent, child = pair
+        els, _ = _elements(cid, 25, 0.0, ["txn", "identity"],
+                           expanded={child: parent, parent: None})
+        tree = [e for e in els if "source" in e["data"]
+                and "treeedge" in e.get("classes", "")]
+        assert tree, "parent->child expansion edge should carry .treeedge"
+        ends = {(e["data"]["source"], e["data"]["target"]) for e in tree}
+        assert any({s, t} == {parent, child} for s, t in ends)
+        return
+    pytest.skip("no hop1-hop2 adjacency in fixture egos")
+
+
 def test_cluster_view():
     for cid in CASES:
         els, stats = _elements(cid, 25, 0.0, ["txn", "identity"], mode="clusters")

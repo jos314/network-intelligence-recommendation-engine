@@ -245,8 +245,10 @@ class PrebuiltGraphSource:
                          last_run_date=r.LAST_RUN_DATE,
                          src_country=_norm(u_cc), dst_country=_norm(v_cc))
             # precomputed shared-contact flags -> identity-link edges
+            # (self-rows are skipped: an entity sharing a phone with itself
+            # is not a link, and it renders as a confusing dashed loop)
             for flag, kind in _IDENTITY_FLAGS:
-                if getattr(r, flag, 0) == 1:
+                if getattr(r, flag, 0) == 1 and r.SRC != r.DST:
                     key = (min(r.SRC, r.DST), max(r.SRC, r.DST), kind)
                     if key not in ident_seen:
                         ident_seen.add(key)

@@ -72,23 +72,35 @@ def _stylesheet(theme):
     t = CY[theme]
     return [
         {"selector": "node", "style": {
-            "width": "mapData(risk, 0, 1, 18, 58)",
-            "height": "mapData(risk, 0, 1, 18, 58)",
+            # kept deliberately small relative to edges (analyst feedback);
+            # deeper hops shrink further so the hierarchy reads at a glance
+            "width": "mapData(risk, 0, 1, 12, 34)",
+            "height": "mapData(risk, 0, 1, 12, 34)",
             "background-color": t["node"],
-            "label": "data(label)", "font-size": "10px",
+            "label": "data(label)", "font-size": "9px",
             # labels fade out when zoomed away — the declutter that matters
             "min-zoomed-font-size": 9,
-            "text-wrap": "ellipsis", "text-max-width": "90px",
-            "color": t["text"], "text-valign": "bottom", "text-margin-y": "4px",
+            "text-wrap": "ellipsis", "text-max-width": "84px",
+            "color": t["text"], "text-valign": "bottom", "text-margin-y": "3px",
             "text-outline-color": t["halo"], "text-outline-width": 2,
             "border-width": 0,
         }},
+        {"selector": "node[hop = 2]", "style": {
+            "width": "mapData(risk, 0, 1, 9, 24)",
+            "height": "mapData(risk, 0, 1, 9, 24)",
+            "font-size": "8px",
+        }},
+        {"selector": "node[hop = 3]", "style": {
+            "width": "mapData(risk, 0, 1, 7, 18)",
+            "height": "mapData(risk, 0, 1, 7, 18)",
+            "font-size": "8px",
+        }},
         {"selector": "node[?is_cluster]", "style": {
             "shape": "hexagon",
-            "width": "mapData(cluster_size, 1, 60, 30, 85)",
-            "height": "mapData(cluster_size, 1, 60, 30, 85)",
+            "width": "mapData(cluster_size, 1, 60, 24, 64)",
+            "height": "mapData(cluster_size, 1, 60, 24, 64)",
             "border-width": 2, "border-style": "double",
-            "border-color": t["muted"], "font-size": "11px",
+            "border-color": t["muted"], "font-size": "10px",
         }},
         {"selector": 'node[decision = "EDD"]',
          "style": {"background-color": RISK_YELLOW[theme]}},
@@ -104,14 +116,27 @@ def _stylesheet(theme):
                    "border-color": RISK_RED[theme]}},
         {"selector": "node[?is_seed]",
          "style": {"shape": "diamond", "border-width": 3, "border-style": "solid",
-                   "border-color": ACCENT[theme]}},
+                   "border-color": ACCENT[theme],
+                   "width": "mapData(risk, 0, 1, 22, 40)",
+                   "height": "mapData(risk, 0, 1, 22, 40)"}},
         {"selector": "edge", "style": {
-            "width": "mapData(weight, 0, 1, 1, 3.5)", "line-color": t["edge"],
-            "curve-style": "bezier", "opacity": 0.55,
+            "width": "mapData(weight, 0, 1, 1.2, 4)", "line-color": t["edge"],
+            "curve-style": "bezier", "opacity": 0.6,
         }},
         {"selector": 'edge[kind = "txn"]', "style": {
             "target-arrow-shape": "triangle", "target-arrow-color": t["edge"],
-            "arrow-scale": 0.7,
+            "arrow-scale": 0.8,
+        }},
+        # the expansion tree: parent -> revealed child, so drill structure
+        # stays legible after several expansions
+        {"selector": "edge.treeedge", "style": {
+            "line-color": ACCENT[theme], "target-arrow-color": ACCENT[theme],
+            "opacity": 0.85, "z-index": 5,
+        }},
+        # focus mode: everything outside subject -> focus -> its children
+        # fades back (tap empty canvas to clear)
+        {"selector": ".dimmed", "style": {
+            "opacity": 0.13, "text-opacity": 0, "events": "yes",
         }},
         {"selector": 'edge[kind != "txn"]',
          "style": {"line-style": "dashed", "line-color": ACCENT[theme]}},
@@ -264,7 +289,15 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         return _cluster_elements(case_id)
     ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
-    expanded = set(expanded or [])
+    # expanded: {child: parent} (parent None when revealed without a drill,
+    # e.g. table click); plain iterables accepted for backward compat
+    if isinstance(expanded, dict):
+        parents = {c: p for c, p in expanded.items() if p}
+        expanded = set(expanded)
+    else:
+        parents = {}
+        expanded = set(expanded or [])
+    tree_pairs = {frozenset((c, p)) for c, p in parents.items()}
     path_nodes, path_pairs = _top_path_members(case_id) if highlight else (set(), set())
 
     hop1 = [n for n, a in ego.nodes(data=True) if a.get("hop") == 1]
@@ -351,18 +384,23 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     # thickness scale from this ego's own largest AGGREGATED flow
     max_amt = max((g["amount"] for g in txn_groups.values()), default=1.0) or 1.0
     for (u, v), g in txn_groups.items():
+        classes = []
+        if frozenset((u, v)) in path_pairs:
+            classes.append("onpath")
+        if frozenset((u, v)) in tree_pairs:
+            classes.append("treeedge")
         els.append({"data": {
             "source": u, "target": v, "kind": "txn",
             "weight": round(min(g["amount"] / max_amt, 1.0), 3),
             "amount": round(g["amount"], 2), "count": g["count"],
             "first": _fmt_date(g["first"]), "last": _fmt_date(g["last"]),
             "src_country": g["src_country"], "dst_country": g["dst_country"],
-        }, "classes": "onpath" if frozenset((u, v)) in path_pairs else ""})
+        }, "classes": " ".join(classes)})
     for (u, v, kind), g in ident_groups.items():
         els.append({"data": {"source": u, "target": v, "kind": kind,
                              "weight": round(min(g["weight"], 1.0), 3),
                              "value": g["value"]},
-                    "classes": ""})
+                    "classes": "treeedge" if frozenset((u, v)) in tree_pairs else ""})
 
     stats = {
         "mode": "entities",
@@ -968,9 +1006,12 @@ LEGEND = html.Div([
     html.Span([html.Span(className="dot dot-ext"), "external (no KYC)"]),
     html.Span([html.Span(className="line"), "transaction (→ money flow)"]),
     html.Span([html.Span(className="line dashed"), "identity link"]),
-    html.Span("size = risk · thickness = amount", title="Node size is the "
-              "entity's risk score; edge thickness is the flow amount relative "
-              "to this case's largest flow"),
+    html.Span([html.Span(className="line line-accent"), "expansion trail"],
+              title="Drawn from a drilled node to the counterparties it revealed"),
+    html.Span("size = risk · deeper hops draw smaller",
+              title="Node size is the entity's risk score within its hop; "
+                    "hop-2/3 nodes are drawn smaller so the drill hierarchy "
+                    "stays readable. Edge thickness is the flow amount."),
 ], className="legend")
 
 
@@ -1067,6 +1108,12 @@ def _main_layout(user):
                                 n_clicks=0),
                     html.Button("Reset view", id="reset-view-btn",
                                 className="btn", n_clicks=0),
+                    html.Button("Expand next hop", id="expand-btn",
+                                className="btn", n_clicks=0,
+                                title="Reveal the focused node's top "
+                                      "counterparties (same as double-click)"),
+                    html.Button("Reset expansion", id="reset-expand-btn",
+                                className="btn", n_clicks=0),
                     html.Details([
                         html.Summary("Advanced"),
                         html.Div([
@@ -1098,16 +1145,10 @@ def _main_layout(user):
                 html.Div([
                     dcc.Dropdown(id="node-search", placeholder="Search entity…",
                                  style={"flex": "1"}),
-                ], style={"display": "flex", "gap": "8px", "marginBottom": "8px",
+                ], style={"display": "flex", "gap": "8px", "marginBottom": "10px",
                           "alignItems": "center"}),
-                html.Div([
-                    html.Button("Expand next hop", id="expand-btn", className="btn",
-                                n_clicks=0),
-                    html.Button("Reset expansion", id="reset-expand-btn",
-                                className="btn", n_clicks=0),
-                ], style={"display": "flex", "gap": "8px", "marginBottom": "10px"}),
                 html.Div(id="side-panel", style={"overflowY": "auto",
-                                                 "maxHeight": "520px"}),
+                                                 "maxHeight": "560px"}),
             ], className="card card-side"),
         ], className="main-row"),
         html.Div([
@@ -1248,7 +1289,11 @@ app.clientside_callback(
                     if (!mode || mode.value !== 'live') { return; }
                     const p = e.target.position(), g = e.target.__grabPos;
                     if (g && Math.hypot(p.x - g.x, p.y - g.y) > 8) {
-                        cy.layout(%s).run();
+                        // settle ONLY the local neighbourhood — re-running
+                        // the whole layout on every drag felt clumsy
+                        e.target.closedNeighborhood().layout(
+                            Object.assign(%s, {numIter: 150,
+                                               animationDuration: 350})).run();
                     }
                 });
                 // drill-down: double-click a node to reveal ITS top
@@ -1258,6 +1303,16 @@ app.clientside_callback(
                     window.dash_clientside.set_props('dbltap-store',
                         {data: {id: e.target.id(), ts: Date.now()}});
                 });
+                // tap empty canvas: back to the subject (clears focus dim)
+                cy.on('tap', function (e) {
+                    if (e.target === cy) {
+                        const seed = cy.nodes('[?is_seed]');
+                        if (seed.length) {
+                            window.dash_clientside.set_props('inspect-store',
+                                {data: {t: 'node', id: seed.id()}});
+                        }
+                    }
+                });
             }
         }, 650);
         return window.dash_clientside.no_update;
@@ -1266,22 +1321,36 @@ app.clientside_callback(
     Output("fit-op", "data"), Input("view-sig", "data"),
 )
 
-# Focus ring follows the inspected node without a server round-trip of the
-# whole element list (camera stays put).
+# Focus ring + focus dimming, all clientside (camera stays put, no server
+# round-trip). Focusing a non-subject node fades everything outside
+# subject -> chain -> focus -> its neighbours; tap empty canvas to clear.
 app.clientside_callback(
     """
-    function(inspect) {
-        %s
-        if (cy) {
+    function(inspect, sig) {
+        setTimeout(function () {
+            %s
+            if (!cy) { return; }
             cy.nodes('.focused').removeClass('focused');
-            if (inspect && inspect.t === 'node' && inspect.id) {
-                cy.getElementById(inspect.id).addClass('focused');
+            cy.elements().removeClass('dimmed');
+            if (!inspect || inspect.t !== 'node' || !inspect.id) { return; }
+            const f = cy.getElementById(inspect.id);
+            if (f.empty()) { return; }
+            f.addClass('focused');
+            if (f.data('is_seed')) { return; }
+            const seed = cy.nodes('[?is_seed]');
+            let lit = f.closedNeighborhood().union(seed);
+            if (seed.length) {
+                const path = cy.elements().aStar(
+                    {root: seed, goal: f, directed: false});
+                if (path.found) { lit = lit.union(path.path); }
             }
-        }
+            cy.elements().difference(lit).addClass('dimmed');
+        }, 250);
         return window.dash_clientside.no_update;
     }
     """ % _JS_FIND_CY,
-    Output("focus-op", "data"), Input("inspect-store", "data"),
+    Output("focus-op", "data"),
+    Input("inspect-store", "data"), Input("view-sig", "data"),
 )
 
 
@@ -1374,27 +1443,40 @@ def _side_panel(inspect, case_id):
 def _expand(n_expand, n_reset, case_id, active_cell, dbltap, cluster_jumps,
             inspect, expanded, viewport_rows):
     """All the ways deeper hops get revealed. Every expansion is that
-    node's TOP-K riskiest neighbours (alerted first) — never a full hub."""
+    node's TOP-K riskiest neighbours (alerted first) — never a full hub.
+
+    Store shape: {child: parent} — the parent link draws the expansion
+    tree edges and keeps the drill structure legible."""
     ctx = dash.callback_context
     trigger = ctx.triggered_id
     value = ctx.triggered[0]["value"] if ctx.triggered else None
     ego = _result(case_id)["ego"]
+    current = (dict(expanded) if isinstance(expanded, dict)
+               else {n: None for n in (expanded or [])})
+
+    def _drill(node):
+        out = dict(current)
+        out.setdefault(node, None)  # the drilled node itself stays revealed
+        for child in expand_top(ego, node) - {node}:
+            out.setdefault(child, node)
+        return out
 
     if trigger in (None, "case") or (trigger == "reset-expand-btn" and value):
-        return []
+        return {}
     if trigger == "dbltap-store" and value and value.get("id") in ego.nodes:
-        return sorted(set(expanded or []) | expand_top(ego, value["id"]))
+        return _drill(value["id"])
     if trigger == "expand-btn" and value:
         focus = (inspect or {}).get("id")
         if (inspect or {}).get("t") != "node" or focus not in ego.nodes:
             raise PreventUpdate
-        return sorted(set(expanded or []) | expand_top(ego, focus))
+        return _drill(focus)
     if isinstance(trigger, dict) and trigger.get("type") == "cluster-jump":
         if not value:
             raise PreventUpdate
         node = trigger["node"]  # jump out of the cluster into entity view
         if node in ego.nodes:
-            return sorted(set(expanded or []) | {node})
+            current.setdefault(node, None)
+            return current
         raise PreventUpdate
     if trigger == "cpty-table" and value and viewport_rows:
         row = value.get("row")
@@ -1403,7 +1485,8 @@ def _expand(n_expand, n_reset, case_id, active_cell, dbltap, cluster_jumps,
         node = _row_node(viewport_rows[row])
         # reveal a clicked row that isn't part of the current baseline view
         if node in ego.nodes:
-            return sorted(set(expanded or []) | {node})
+            current.setdefault(node, None)
+            return current
     raise PreventUpdate
 
 
@@ -1431,7 +1514,7 @@ def _reset_view(n):
     ctx = dash.callback_context
     if not ctx.triggered or not ctx.triggered[0]["value"]:
         raise PreventUpdate
-    return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"], [], [])
+    return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"], [], {})
 
 
 @app.callback(

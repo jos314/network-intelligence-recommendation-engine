@@ -137,6 +137,7 @@ details.adv summary:hover { color: var(--accent); }
 .legend .dot-ext { border-radius: 2px; border: 1.5px dashed var(--muted); background: transparent; }
 .legend .line { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); margin-right: 5px; vertical-align: 3px; }
 .legend .dashed { border-top-style: dashed; border-top-color: var(--accent); }
+.legend .line-accent { border-top-color: var(--accent); }
 
 .prop-grid { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12px; }
 .prop-grid .k { color: var(--muted); }
