@@ -1,29 +1,33 @@
 """P4 acceptance — the drill-down analyst screen: top-N baseline, expansion
 primitives, cluster view, honesty disclosures, and the conclusion loop."""
 import pytest
+from dash.exceptions import PreventUpdate
 
 from src import config
 from src.app.app import (CASES, DA, _apply_filters, _conclusion_content,
                          _counterparty_frame, _elements, _decision_panel,
-                         _layout_spec, _quickstats_panel, _render, _result,
-                         _row_conditional, expand_top)
+                         _graph_caption, _isolate_follows_expansions,
+                         _isolate_options, _layout_spec, _quickstats_panel,
+                         _render, _result, _row_conditional, _static_layout,
+                         expand_top)
 
 
 def _render_case(case_id, **over):
     args = dict(top_n=config.TOP_N_DEFAULT, min_risk=0.0,
                 edge_kinds=["txn", "identity"], layout_mode="force",
                 highlight=[], theme="dark", expanded=[], view_mode="entities",
-                isolate=[])
+                isolate=[], place_nonce=0)
     args.update(over)
     return _render(case_id, args["top_n"], args["min_risk"], args["edge_kinds"],
                    args["layout_mode"], args["highlight"], args["theme"],
-                   args["expanded"], args["view_mode"], args["isolate"])
+                   args["expanded"], args["view_mode"], args["isolate"],
+                   args["place_nonce"])
 
 
 @pytest.mark.parametrize("case_id", CASES)
 def test_render_all_cases(case_id):
     (els, style, layout, decision, stats_panel, caption, drivers, paths, opts,
-     theme, view_sig, sort_by, search_val) = _render_case(case_id)
+     theme, view_sig, sort_by, search_val, iso_opts) = _render_case(case_id)
     nodes = [e for e in els if "source" not in e["data"]]
     edges = [e for e in els if "source" in e["data"]]
     assert nodes and edges and decision and stats_panel
@@ -191,6 +195,63 @@ def test_layout_modes_and_identity_cache():
     assert live["name"] == "preset" and not live["fit"]
     assert _layout_spec("force", "X")["name"] == "cose"
     assert _layout_spec("live", "X") is live  # camera-stability cache
+    # static layouts never fit (the view-sig pass owns the camera) and
+    # cose never randomizes (re-runs must not reshuffle from scratch)
+    assert _layout_spec("rings", "X")["fit"] is False
+    assert _layout_spec("force", "X")["fit"] is False
+    assert _layout_spec("force", "X")["randomize"] is False
+
+
+def test_static_layout_identity_follows_element_set():
+    """dash-cytoscape re-runs a layout only on a NEW dict identity: same
+    element set -> same dict (no reshuffle); changed set -> fresh dict
+    (new nodes actually get laid out — the rings-mode pile-up bug)."""
+    els_a, _ = _elements(1, 25, 0.0, ["txn", "identity"])
+    els_b, _ = _elements(2, 25, 0.0, ["txn", "identity"])
+    one = _static_layout("rings", "S", els_a)
+    assert _static_layout("rings", "S", els_a) is one
+    other = _static_layout("rings", "S", els_b)
+    assert other is not one
+    # live mode passes the cached preset through untouched
+    assert _static_layout("live", "S", els_a)["name"] == "preset"
+
+
+def test_isolate_control_lifecycle():
+    """The lens control explains itself: disabled without expansions,
+    enabled with them; the value clears when expansions are reset."""
+    assert _isolate_options(False)[0]["disabled"] is True
+    assert _isolate_options(True)[0]["disabled"] is False
+    # server side: isolate without expansions is a no-op, disclosed in stats
+    els_plain, stats_plain = _elements(1, 25, 0.0, ["txn", "identity"])
+    els_iso, stats_iso = _elements(1, 25, 0.0, ["txn", "identity"],
+                                   expanded={}, isolate=True)
+    assert not stats_iso["isolated"]
+    assert stats_iso["nodes_shown"] == stats_plain["nodes_shown"]
+    # ticked lens dies with its expansions
+    assert _isolate_follows_expansions({}, ["on"]) == []
+    with pytest.raises(PreventUpdate):
+        _isolate_follows_expansions({"c": "p"}, ["on"])
+    with pytest.raises(PreventUpdate):
+        _isolate_follows_expansions({}, [])
+
+
+def test_min_risk_alert_exemption_is_disclosed():
+    """Alerted nodes survive any min-risk cut — the caption must SAY so,
+    otherwise an alert-heavy case makes the slider look broken."""
+    for cid in CASES:
+        ego = _result(cid)["ego"]
+        els, stats = _elements(cid, 25, 1.0, ["txn", "identity"])
+        ids = {e["data"]["id"] for e in els if "source" not in e["data"]}
+        kept_alerted = [n for n in ids if ego.nodes[n].get("alerted")
+                        and ego.nodes[n].get("final_risk", 0.0) < 1.0
+                        and n != ego.graph["seed"]]
+        if not kept_alerted:
+            continue
+        assert stats["alert_exempt"] == len(kept_alerted)
+        rendered = str(_graph_caption(stats, ego))
+        assert "alerted kept despite min-risk" in rendered
+        return
+    pytest.skip("no alerted hop-1 nodes below risk 1.0 in fixture egos")
 
 
 def test_counterparty_frame_ranked_with_flow_columns():

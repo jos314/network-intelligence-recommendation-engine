@@ -85,14 +85,14 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | Control | What it does |
 |---|---|
 | entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view) |
-| isolate expansions | the expansion lens: only subject + drilled parents + revealed children + the earlier-hop nodes they connect back to; only expansion-relevant edges draw |
+| isolate expansions | the expansion lens: only subject + drilled parents + revealed children + the earlier-hop nodes they connect back to; only expansion-relevant edges draw. **Disabled (with a tooltip) until an expansion exists**, and unticks itself when expansions are reset — it can never silently do nothing |
 | Show top (10/25/50/100) | how many of the subject's riskiest DIRECT counterparties form the baseline view |
-| Min risk | live-filters the view while dragging |
+| Min risk | live-filters the view while dragging. **Alerted entities are exempt** (an alert can never be filtered off screen), so on an alert-heavy case the picture may not change — the caption then says "N alerted kept despite min-risk X" |
 | **double-click a node** | reveals that node's own top-K riskiest counterparties (next hop, down to 3) — the core drill-down gesture |
 | Expand next hop of <entity> / Reset expansion | button equivalent of double-click, and the undo |
 | key risk path | force-draws the top Stage-C path |
 | ◎ Center subject | pans/zooms onto the seed diamond and focuses it |
-| Reset view | entities mode, top 25, min risk 0, no expansions |
+| Reset view | entities mode, top 25, min risk 0, no expansions — **and rebuilds the canonical layout from scratch** (subject centred, ring, blooms), discarding every dragged position. This is the rescue hatch: whatever state the canvas is in, Reset view restores a readable graph |
 | Advanced | edge-family toggles and layout modes. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (hop-1 ring, children bloom from their parent) — dragging tugs springs, nothing ever reshuffles; **force** = static; **rings** = concentric by hop |
 | click a node / edge / cluster / table row | inspects it (the camera never moves on click) |
 | Search entity… | focus any scored node by name/id |
@@ -139,8 +139,19 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
   the same file so dcc components follow the theme. The cytoscape canvas
   cannot read CSS variables, so its palette is mirrored in `CY` in `app.py`.
 * Two clientside callbacks talk to the live cytoscape instance (found via
-  `#graph._cyreg`): the center-subject animation, and a fit-once +
-  spring-on-release handler that gives the live-physics feel.
+  `#graph._cyreg`): the center-subject animation, and the view-sig pass that
+  places new nodes, fits the camera, and drives the continuous force
+  simulation.
+* **Layout-engine contract (learned the hard way):** dash-cytoscape re-runs
+  a static layout (rings/force/clusters) only when the `layout` prop is a
+  NEW dict — `_static_layout` hands out a fresh identity exactly when the
+  element set changed, so expansions get laid out but theme flips never
+  reshuffle. The clientside placement pass runs in LIVE mode only (elsewhere
+  it would fight the layout engine); its per-node placement memory is pruned
+  when a node leaves the graph, so a mode round-trip re-places instead of
+  exploding a stale (0,0) pile. Reset view bumps a nonce that wipes that
+  memory entirely, and the component clamps zoom (0.03–4) so no degenerate
+  fit can wedge the canvas.
 * **Lesson learned (regression-guarded):** never place a callback `Input`
   component inside callback-rendered children — Dash re-fires the callback
   when the component is re-created. The download buttons are static and the

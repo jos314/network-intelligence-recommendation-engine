@@ -168,9 +168,11 @@ def _layout_spec(mode, seed):
     if key not in _LAYOUT_CACHE:
         if mode == "rings":  # §6: nodes ringed by hop distance around the seed
             spec = {"name": "breadthfirst", "circle": True, "animate": False,
+                    "fit": False,
                     "roots": '[id = "%s"]' % seed, "spacingFactor": 1.1}
         elif mode == "force":  # static: compute once, no motion
-            spec = {"name": "cose", "animate": False, "nodeRepulsion": 12000,
+            spec = {"name": "cose", "animate": False, "fit": False,
+                    "randomize": False, "nodeRepulsion": 12000,
                     "idealEdgeLength": 80, "padding": 24}
         else:
             # "live" (default): PRESET — cytoscape never runs a layout.
@@ -180,6 +182,34 @@ def _layout_spec(mode, seed):
             spec = {"name": "preset", "fit": False, "animate": False}
         _LAYOUT_CACHE[key] = spec
     return _LAYOUT_CACHE[key]
+
+
+_STATIC_LAYOUT_LAST = {}
+
+
+def _static_layout(mode, seed, els):
+    """Layout dict for the graph, with the identity dash-cytoscape needs.
+
+    dash-cytoscape re-runs a layout only when the `layout` prop is a NEW
+    object. Static layouts (rings/force/clusters) must re-run when the
+    element SET changes — otherwise nodes added later (expansions, filter
+    changes, a mode round-trip) are never laid out and pile up unplaced.
+    Same element set -> same cached dict -> no re-layout, so unrelated
+    re-renders (theme, focus) never reshuffle. `fit` stays False everywhere:
+    the view-sig clientside pass owns the camera.
+    """
+    base = _layout_spec(mode, seed)
+    if base.get("name") == "preset":  # live mode: never lays out anyway
+        return base
+    key = hash(frozenset((e["data"].get("id"), e["data"].get("source"),
+                          e["data"].get("target"), e["data"].get("kind"))
+                         for e in els))
+    last = _STATIC_LAYOUT_LAST.get((mode, seed))
+    if last is not None and last[0] == key:
+        return last[1]
+    spec = dict(base)
+    _STATIC_LAYOUT_LAST[(mode, seed)] = (key, spec)
+    return spec
 
 
 # --------------------------------------------------- data access (lazy)
@@ -315,7 +345,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     baseline = {seed} | set(top_hop1) | expanded | path_nodes
 
     visible, hidden_flagged = set(), 0
-    path_revealed = 0
+    path_revealed, alert_exempt = 0, 0
     isolated = bool(isolate) and bool(expanded)
     if isolated:
         # the expansion lens: subject + drilled parents + revealed children
@@ -337,10 +367,13 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
                 continue
             a = ego.nodes[n]
             forced = n == seed or n in expanded or n in path_nodes
-            if a.get("final_risk", 0.0) < min_risk and not (forced or a.get("alerted")):
+            below_cut = a.get("final_risk", 0.0) < min_risk
+            if below_cut and not (forced or a.get("alerted")):
                 if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
                     hidden_flagged += 1
                 continue
+            if below_cut and not forced and a.get("alerted"):
+                alert_exempt += 1  # kept ONLY because alerted — disclose it
             if n in path_nodes and n not in expanded and n != seed \
                     and n not in top_hop1:
                 path_revealed += 1
@@ -480,6 +513,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         "expanded_shown": sum(1 for n in visible
                               if n in expanded and ego.nodes[n].get("hop", 0) > 1),
         "alerted_offscreen": alerted_offscreen, "hidden_flagged": hidden_flagged,
+        "alert_exempt": alert_exempt, "min_risk": float(min_risk or 0.0),
         "path_revealed": path_revealed, "render_capped": render_capped,
     }
     return els, stats
@@ -1143,6 +1177,14 @@ def _graph_caption(stats, ego):
     if stats["hidden_flagged"]:
         parts.append(html.Span("%d flagged entities hidden by min-risk"
                                % stats["hidden_flagged"], className="caption-warn"))
+    if stats.get("alert_exempt"):
+        parts.append(html.Span(
+            "%d alerted kept despite min-risk %.2f"
+            % (stats["alert_exempt"], stats.get("min_risk", 0.0)),
+            className="caption-note",
+            title="TM-alerted entities are never filtered out — raising "
+                  "min-risk cannot hide an alert. On an alert-heavy case "
+                  "the picture may therefore not change at all."))
     if stats["path_revealed"]:
         parts.append(html.Span("key path revealed %d extra node%s"
                                % (stats["path_revealed"],
@@ -1165,6 +1207,18 @@ def _graph_caption(stats, ego):
                   "Recorded in the evidence pack (governance.scoring_scope)."
                   % trunc["strategy"]))
     return parts
+
+
+def _isolate_options(enabled):
+    """The expansion lens is meaningless without an expansion — say so on
+    the control itself instead of silently doing nothing."""
+    return [{"label": " isolate expansions", "value": "on",
+             "disabled": not enabled,
+             "title": ("reduce the view to the expansion trails: subject, "
+                       "drilled parents, revealed children and their "
+                       "back-links" if enabled else
+                       "expand a node first (double-click one, or use the "
+                       "Expand button) — this lens isolates expansions")}]
 
 
 LEGEND = html.Div([
@@ -1342,9 +1396,8 @@ def _main_layout(user):
                                   options=[{"label": " key risk path",
                                             "value": "on"}], value=[], inline=True),
                     dcc.Checklist(id="isolate-exp",
-                                  options=[{"label": " isolate expansions",
-                                            "value": "on"}], value=[], inline=True,
-                                  className="ctl-tip"),
+                                  options=_isolate_options(False), value=[],
+                                  inline=True, className="ctl-tip"),
                     html.Button("◎ Center subject", id="center-btn", className="btn",
                                 n_clicks=0),
                     html.Button("Reset view", id="reset-view-btn",
@@ -1378,7 +1431,11 @@ def _main_layout(user):
                 cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
                                style={"width": "100%", "height": "500px"},
                                elements=[], stylesheet=_stylesheet("light"),
-                               responsive=True),
+                               responsive=True,
+                               # a degenerate fit (all nodes stacked) must
+                               # never be able to wedge the canvas at an
+                               # unusable zoom
+                               minZoom=0.03, maxZoom=4),
                 html.Div(id="graph-caption", className="graph-caption"),
                 LEGEND,
             ], className="card card-graph"),
@@ -1426,6 +1483,7 @@ def _main_layout(user):
         dcc.Store(id="fit-op"),
         dcc.Store(id="focus-op"),
         dcc.Store(id="dbltap-store"),
+        dcc.Store(id="place-nonce", data=0),
         dcc.Store(id="conclusion-refresh", data=0),
         dcc.Download(id="download"),
     ])
@@ -1517,40 +1575,71 @@ app.clientside_callback(
 # graph relaxes smoothly and NEVER reshuffles or randomizes.
 app.clientside_callback(
     """
-    function(sig) {
+    function(sig, nonce) {
         setTimeout(function () {
             %s
             if (!cy) { return; }
 
+            const liveMode = function () {
+                const m = document.querySelector('#layout-mode input:checked');
+                return m && m.value === 'live'
+                    && cy.nodes('[?is_cluster]').length === 0;
+            };
+
+            // Reset view bumps the nonce: forget every remembered position
+            // and velocity so the canonical bloom rebuilds from the hints.
+            if (cy.scratch('_lastNonce') !== nonce) {
+                cy.scratch('_lastNonce', nonce);
+                if (nonce) {
+                    cy.scratch('_placed', {});
+                    if (cy.__sim) { cy.__sim.vel = {}; }
+                }
+            }
+
             // ---- place nodes the client hasn't seen yet -----------------
-            const placed = cy.scratch('_placed') || {};
+            // LIVE mode only: in force/rings/cluster modes the cytoscape
+            // layout owns positions — placing hints there fights it.
             let newNodes = 0;
-            cy.nodes().forEach(function (n) {
-                if (placed[n.id()]) { return; }
-                let p = null;
-                const ph = n.data('phint');
-                if (ph) {  // bloom out of the parent's LIVE position
-                    const par = cy.getElementById(ph);
-                    if (par.length && placed[par.id()]) {
-                        const pp = par.position();
-                        const seed = cy.nodes('[?is_seed]');
-                        const sp = seed.length ? seed.position() : {x: 0, y: 0};
-                        const base = Math.atan2(pp.y - sp.y, pp.x - sp.x) || 0;
-                        const k = n.data('kidx') || 0;
-                        const ang = base + ((k %% 7) - 3) * 0.33;
-                        const r = 130 + 40 * Math.floor(k / 7);
-                        p = {x: pp.x + r * Math.cos(ang),
-                             y: pp.y + r * Math.sin(ang)};
+            if (liveMode()) {
+                const placed = cy.scratch('_placed') || {};
+                cy.nodes().forEach(function (n) {
+                    if (placed[n.id()]) { return; }
+                    let p = null;
+                    const ph = n.data('phint');
+                    if (ph) {  // bloom out of the parent's LIVE position
+                        const par = cy.getElementById(ph);
+                        if (par.length && placed[par.id()]) {
+                            const pp = par.position();
+                            const seed = cy.nodes('[?is_seed]');
+                            const sp = seed.length ? seed.position() : {x: 0, y: 0};
+                            const base = Math.atan2(pp.y - sp.y, pp.x - sp.x) || 0;
+                            const k = n.data('kidx') || 0;
+                            const ang = base + ((k %% 7) - 3) * 0.33;
+                            const r = 130 + 40 * Math.floor(k / 7);
+                            p = {x: pp.x + r * Math.cos(ang),
+                                 y: pp.y + r * Math.sin(ang)};
+                        }
                     }
+                    if (!p && typeof n.data('x0') === 'number') {
+                        p = {x: n.data('x0'), y: n.data('y0')};
+                    }
+                    if (p) { n.position(p); }
+                    placed[n.id()] = true;
+                    newNodes++;
+                });
+                cy.scratch('_placed', placed);
+            }
+
+            // a runaway position must never survive into a fit or a tick
+            cy.nodes().forEach(function (n) {
+                const p = n.position();
+                if (!isFinite(p.x) || !isFinite(p.y)) {
+                    n.position({
+                        x: typeof n.data('x0') === 'number' ? n.data('x0') : 0,
+                        y: typeof n.data('y0') === 'number' ? n.data('y0') : 0});
+                    if (cy.__sim) { delete cy.__sim.vel[n.id()]; }
                 }
-                if (!p && typeof n.data('x0') === 'number') {
-                    p = {x: n.data('x0'), y: n.data('y0')};
-                }
-                if (p) { n.position(p); }
-                placed[n.id()] = true;
-                newNodes++;
             });
-            cy.scratch('_placed', placed);
 
             if (cy.nodes().length) { cy.resize(); cy.fit(undefined, 40); }
 
@@ -1559,9 +1648,7 @@ app.clientside_callback(
                 const sim = {alpha: 0, running: false, vel: {}};
                 cy.__sim = sim;
                 const liveOn = function () {
-                    const m = document.querySelector('#layout-mode input:checked');
-                    return m && m.value === 'live'
-                        && cy.nodes('[?is_cluster]').length === 0
+                    return liveMode()
                         && cy.nodes().length > 1 && cy.nodes().length <= 500;
                 };
                 const tick = function () {
@@ -1617,8 +1704,10 @@ app.clientside_callback(
                         const v = sim.vel[n.id()] || {x: 0, y: 0};
                         v.x = (v.x + f.x * sim.alpha * 0.02) * 0.86;
                         v.y = (v.y + f.y * sim.alpha * 0.02) * 0.86;
+                        if (!isFinite(v.x) || !isFinite(v.y)) { v.x = 0; v.y = 0; }
                         sim.vel[n.id()] = v;
-                        n.position({x: pos[n.id()].x + v.x, y: pos[n.id()].y + v.y});
+                        const nx = pos[n.id()].x + v.x, ny = pos[n.id()].y + v.y;
+                        if (isFinite(nx) && isFinite(ny)) { n.position({x: nx, y: ny}); }
                     });
                     cy.endBatch();
                     sim.alpha *= 0.99;
@@ -1639,6 +1728,15 @@ app.clientside_callback(
             // ---- one-time interaction handlers ---------------------------
             if (!cy.__handlersAttached) {
                 cy.__handlersAttached = true;
+                // a node that leaves the graph must lose its remembered
+                // placement + velocity: if it ever comes back (mode
+                // round-trip, filter change) it gets a FRESH deterministic
+                // position instead of exploding out of a stale (0,0) pile
+                cy.on('remove', 'node', function (e) {
+                    const pl = cy.scratch('_placed');
+                    if (pl) { delete pl[e.target.id()]; }
+                    if (cy.__sim) { delete cy.__sim.vel[e.target.id()]; }
+                });
                 // drill-down: double-click a node to reveal ITS top
                 // counterparties (next hop); clusters don't expand
                 cy.on('dbltap', 'node', function (e) {
@@ -1662,6 +1760,7 @@ app.clientside_callback(
     }
     """ % _JS_FIND_CY,
     Output("fit-op", "data"), Input("view-sig", "data"),
+    State("place-nonce", "data"),
 )
 
 # Focus ring + focus dimming, all clientside (camera stays put, no server
@@ -1851,14 +1950,30 @@ def _cluster_jump_switches_view(clicks):
     Output("min-risk", "value"), Output("edge-kinds", "value"),
     Output("highlight-path", "value"), Output("isolate-exp", "value"),
     Output("expanded-store", "data", allow_duplicate=True),
-    Input("reset-view-btn", "n_clicks"), prevent_initial_call=True,
+    Output("place-nonce", "data"),
+    Input("reset-view-btn", "n_clicks"), State("place-nonce", "data"),
+    prevent_initial_call=True,
 )
-def _reset_view(n):
+def _reset_view(n, nonce):
     ctx = dash.callback_context
     if not ctx.triggered or not ctx.triggered[0]["value"]:
         raise PreventUpdate
+    # bumping the nonce makes the clientside pass forget every remembered
+    # position: Reset view is the rescue hatch back to the canonical layout
     return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"],
-            [], [], {})
+            [], [], {}, (nonce or 0) + 1)
+
+
+@app.callback(
+    Output("isolate-exp", "value", allow_duplicate=True),
+    Input("expanded-store", "data"), State("isolate-exp", "value"),
+    prevent_initial_call=True,
+)
+def _isolate_follows_expansions(expanded, value):
+    """The lens cannot outlive the expansions it isolates."""
+    if expanded or not value:
+        raise PreventUpdate
+    return []
 
 
 @app.callback(
@@ -1894,14 +2009,15 @@ def _conclusion_actions(n_refresh, n_save, text, case_id, bump):
     Output("node-search", "options"), Output("root", "className"),
     Output("view-sig", "data"),
     Output("cpty-table", "sort_by"), Output("node-search", "value"),
+    Output("isolate-exp", "options"),
     Input("case", "value"), Input("top-n", "value"), Input("min-risk", "value"),
     Input("edge-kinds", "value"), Input("layout-mode", "value"),
     Input("highlight-path", "value"), Input("theme-store", "data"),
     Input("expanded-store", "data"), Input("view-mode", "value"),
-    Input("isolate-exp", "value"),
+    Input("isolate-exp", "value"), Input("place-nonce", "data"),
 )
 def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
-            theme, expanded, view_mode, isolate):
+            theme, expanded, view_mode, isolate, place_nonce):
     r = _result(case_id)
     ev = r["evidence"]
     els, stats = _elements(case_id, top_n or config.TOP_N_DEFAULT, min_risk,
@@ -1927,17 +2043,21 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
 
     view_sig = json.dumps([case_id, top_n, min_risk, sorted(edge_kinds or []),
                            layout_mode, sorted(expanded or []),
-                           bool(highlight), view_mode, bool(isolate)])
+                           bool(highlight), view_mode, bool(isolate),
+                           place_nonce or 0])
     # cluster mode always uses the static force layout — the live physics
-    # simulation only makes sense for entity nodes with placement hints
-    layout = (_layout_spec("force", ev["subject_id"])
-              if (view_mode or "entities") == "clusters"
-              else _layout_spec(layout_mode, ev["subject_id"]))
+    # simulation only makes sense for entity nodes with placement hints.
+    # Static layouts get a fresh dict identity when the element set changed
+    # so dash-cytoscape re-runs them (new nodes must be laid out).
+    layout = _static_layout(
+        "force" if (view_mode or "entities") == "clusters" else layout_mode,
+        ev["subject_id"], els)
     return (els, _stylesheet(theme), layout,
             _decision_panel(case_id, ev), _quickstats_panel(ev),
             _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,
-            "theme-%s" % theme, view_sig, sort_by, search_val)
+            "theme-%s" % theme, view_sig, sort_by, search_val,
+            _isolate_options(bool(expanded)))
 
 
 # ---- counterparty table: server-side custom filtering + row selection ----
