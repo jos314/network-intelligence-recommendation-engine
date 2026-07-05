@@ -26,6 +26,7 @@ Run:  .venv/bin/python -m src.app.app   (then open http://127.0.0.1:8050)
 """
 import json
 import os
+import re
 
 import dash
 import dash_cytoscape as cyto
@@ -508,11 +509,16 @@ _FRAME_COLUMNS = ["entity", "id", "type", "hop", "final_risk", "decision",
                   "last_seen", "volume_share_%", "shared_attrs", "case_id"]
 
 
+_FRAME_CACHE = {}
+
+
 def _counterparty_frame(case_id):
     """Ranked counterparty rows, capped at TABLE_MAX_ROWS (top by risk).
 
     Returns (frame, total_counterparties) — the cap is disclosed next to
-    the table, never applied silently."""
+    the table, never applied silently. Cached per case (the ego is fixed)."""
+    if case_id in _FRAME_CACHE:
+        return _FRAME_CACHE[case_id]
     ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
     ranked = sorted((n for n in ego.nodes if n != seed),
@@ -545,8 +551,84 @@ def _counterparty_frame(case_id):
             "_node": n,  # graph key for click-to-inspect (hidden column)
         })
     if not rows:  # isolated seed: render an empty table, never a KeyError
-        return pd.DataFrame(columns=_FRAME_COLUMNS + ["_node"]), 0
-    return pd.DataFrame(rows), total
+        out = (pd.DataFrame(columns=_FRAME_COLUMNS + ["_node"]), 0)
+    else:
+        out = (pd.DataFrame(rows), total)
+    _FRAME_CACHE[case_id] = out
+    return out
+
+
+# ------------------------------------------------------ table filtering
+# Custom, server-side (native Dash filtering is case-sensitive, has no
+# operator UI, and can't compare numbers/dates properly). Operators are
+# exposed as dropdowns; dates as range pickers.
+_NUM_OPS = {
+    "gte": lambda s, v: s >= v,
+    "gt": lambda s, v: s > v,
+    "eq": None,  # handled specially (round to column precision)
+    "lt": lambda s, v: s < v,
+    "lte": lambda s, v: s <= v,
+}
+_NUM_OP_OPTIONS = [
+    {"label": "≥", "value": "gte"}, {"label": ">", "value": "gt"},
+    {"label": "=", "value": "eq"}, {"label": "<", "value": "lt"},
+    {"label": "≤", "value": "lte"},
+]
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _num_mask(series, op, val, prec):
+    if val is None or val == "" or not op:
+        return pd.Series(True, index=series.index)
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return pd.Series(True, index=series.index)
+    s = pd.to_numeric(series, errors="coerce")
+    if op == "eq":
+        return (s.round(prec) == round(v, prec)).fillna(False)
+    fn = _NUM_OPS.get(op)
+    if fn is None:
+        return pd.Series(True, index=series.index)
+    return fn(s, v).fillna(False)
+
+
+def _date_mask(series, dfrom, dto):
+    if not dfrom and not dto:
+        return pd.Series(True, index=series.index)
+    s = series.astype(str)  # ISO strings sort chronologically; "—" excluded
+    m = s.str.match(_ISO_RE)
+    if dfrom:
+        m &= s >= str(dfrom)[:10]
+    if dto:
+        m &= s <= str(dto)[:10]
+    return m
+
+
+def _apply_filters(frame, *, text=None, decisions=None, type_=None,
+                   alerted_only=False, risk_op=None, risk_val=None,
+                   amt_op=None, amt_val=None, txn_op=None, txn_val=None,
+                   first_from=None, first_to=None, last_from=None, last_to=None):
+    if frame.empty:
+        return frame
+    mask = pd.Series(True, index=frame.index)
+    if text and str(text).strip():
+        t = str(text).strip().lower()
+        hay = (frame["entity"].astype(str).str.lower() + " "
+               + frame["id"].astype(str).str.lower())
+        mask &= hay.str.contains(re.escape(t), na=False)  # case-insensitive
+    if decisions:
+        mask &= frame["decision"].isin(decisions)
+    if type_:
+        mask &= frame["type"] == type_
+    if alerted_only:
+        mask &= frame["alerted"] == "yes"
+    mask &= _num_mask(frame["final_risk"], risk_op, risk_val, 3)
+    mask &= _num_mask(frame["total_amount"], amt_op, amt_val, 0)
+    mask &= _num_mask(frame["txn_count"], txn_op, txn_val, 0)
+    mask &= _date_mask(frame["first_seen"], first_from, first_to)
+    mask &= _date_mask(frame["last_seen"], last_from, last_to)
+    return frame[mask]
 
 
 _TABLE_COLUMN_LABELS = {
@@ -577,6 +659,41 @@ def _row_node(row: dict):
     return row.get("_node") or row.get("id")
 
 
+# Base conditional cell styling (colour by decision / risk band / alert),
+# plus the whole-row and active-cell selection tint. The row highlight is
+# appended dynamically by _highlight_row on active_cell.
+_BASE_CONDITIONAL = [
+    {"if": {"filter_query": '{decision} = "SAR"', "column_id": "decision"},
+     "color": "var(--risk-red)", "fontWeight": "650"},
+    {"if": {"filter_query": '{decision} = "EDD"', "column_id": "decision"},
+     "color": "var(--risk-yellow-text)", "fontWeight": "650"},
+    # risk cell colours follow the SAME thresholds as the decision bands
+    {"if": {"filter_query": "{final_risk} >= %s" % config.DECISION_T2,
+            "column_id": "final_risk"},
+     "color": "var(--risk-red)", "fontWeight": "650"},
+    {"if": {"filter_query": "{final_risk} >= %s && {final_risk} < %s"
+            % (config.DECISION_T1, config.DECISION_T2),
+            "column_id": "final_risk"},
+     "color": "var(--risk-yellow-text)", "fontWeight": "650"},
+    {"if": {"filter_query": '{alerted} = "yes"', "column_id": "alerted"},
+     "color": "var(--risk-red)"},
+    # the clicked cell inherits the row tint (no lone blue cell outline)
+    {"if": {"state": "active"},
+     "backgroundColor": "var(--row-sel)", "border": "none"},
+    {"if": {"state": "selected"},
+     "backgroundColor": "var(--row-sel)", "border": "none"},
+]
+
+
+def _row_conditional(active_row):
+    """Base styling + a full-row highlight for the selected row."""
+    styles = list(_BASE_CONDITIONAL)
+    if active_row is not None:
+        styles.append({"if": {"row_index": active_row},
+                       "backgroundColor": "var(--row-sel)"})
+    return styles
+
+
 def _table_styles():
     return dict(
         style_table={"overflowX": "auto"},
@@ -589,22 +706,7 @@ def _table_styles():
                       "fontWeight": "650", "textTransform": "uppercase",
                       "fontSize": "10.5px", "letterSpacing": "0.05em",
                       "border": "none", "borderBottom": "2px solid var(--border)"},
-        style_data_conditional=[
-            {"if": {"filter_query": '{decision} = "SAR"', "column_id": "decision"},
-             "color": "var(--risk-red)", "fontWeight": "650"},
-            {"if": {"filter_query": '{decision} = "EDD"', "column_id": "decision"},
-             "color": "var(--risk-yellow-text)", "fontWeight": "650"},
-            # risk cell colours follow the SAME thresholds as the decision bands
-            {"if": {"filter_query": "{final_risk} >= %s" % config.DECISION_T2,
-                    "column_id": "final_risk"},
-             "color": "var(--risk-red)", "fontWeight": "650"},
-            {"if": {"filter_query": "{final_risk} >= %s && {final_risk} < %s"
-                    % (config.DECISION_T1, config.DECISION_T2),
-                    "column_id": "final_risk"},
-             "color": "var(--risk-yellow-text)", "fontWeight": "650"},
-            {"if": {"filter_query": '{alerted} = "yes"', "column_id": "alerted"},
-             "color": "var(--risk-red)"},
-        ],
+        style_data_conditional=list(_BASE_CONDITIONAL),
     )
 
 
@@ -1030,6 +1132,67 @@ _case_options = [
      "value": c} for c in CASES]
 
 
+def _op_dd(id_):
+    return dcc.Dropdown(id=id_, options=_NUM_OP_OPTIONS, value="gte",
+                        clearable=False, className="flt-op")
+
+
+def _filter_bar():
+    """Custom filter bar (replaces Dash's native per-column filter row).
+
+    Always-visible: case-insensitive text search + decision/type/alerted +
+    Clear. Behind 'More filters': numeric operator+value for risk/amount/
+    txns, and range pickers for the first/last-seen dates (leave one side
+    blank for a one-sided before/after)."""
+    return html.Div([
+        html.Div([
+            dcc.Input(id="flt-text", type="text", debounce=False,
+                      placeholder="Filter by entity or ID…", className="flt-text"),
+            dcc.Dropdown(id="flt-decision", multi=True, placeholder="Decision",
+                         options=[{"label": d, "value": d} for d in
+                                  (config.DECISION_NO_ACTION, config.DECISION_EDD,
+                                   config.DECISION_SAR)], className="flt-dd"),
+            dcc.Dropdown(id="flt-type", placeholder="Type",
+                         options=[{"label": "customer", "value": "customer"},
+                                  {"label": "external", "value": "external"}],
+                         className="flt-dd"),
+            dcc.Checklist(id="flt-alerted",
+                          options=[{"label": " alerted only", "value": "on"}],
+                          value=[], className="flt-chk"),
+            html.Button("Clear filters", id="flt-clear", className="btn btn-xs",
+                        n_clicks=0),
+        ], className="flt-row"),
+        html.Details([
+            html.Summary("More filters — risk, amounts, dates"),
+            html.Div([
+                html.Span("Risk", className="flt-lbl"), _op_dd("flt-risk-op"),
+                dcc.Input(id="flt-risk-val", type="number", step=0.05,
+                          min=0, max=1, placeholder="0–1", className="flt-num"),
+                html.Span("Amount", className="flt-lbl"), _op_dd("flt-amt-op"),
+                dcc.Input(id="flt-amt-val", type="number",
+                          placeholder="base ccy", className="flt-num"),
+                html.Span("# Txns", className="flt-lbl"), _op_dd("flt-txn-op"),
+                dcc.Input(id="flt-txn-val", type="number", placeholder="count",
+                          className="flt-num"),
+            ], className="flt-row", style={"paddingTop": "8px"}),
+            html.Div([
+                html.Span("First seen", className="flt-lbl"),
+                dcc.DatePickerRange(id="flt-first", display_format="YYYY-MM-DD",
+                                    clearable=True, className="flt-date",
+                                    minimum_nights=0,
+                                    start_date_placeholder_text="after",
+                                    end_date_placeholder_text="before"),
+                html.Span("Last seen", className="flt-lbl"),
+                dcc.DatePickerRange(id="flt-last", display_format="YYYY-MM-DD",
+                                    clearable=True, className="flt-date",
+                                    minimum_nights=0,
+                                    start_date_placeholder_text="after",
+                                    end_date_placeholder_text="before"),
+            ], className="flt-row", style={"paddingTop": "4px"}),
+        ], className="adv"),
+    ], className="filter-bar")
+
+
 def _login_view():
     return html.Div(html.Div([
         html.Div("◆", className="login-mark"),
@@ -1171,9 +1334,10 @@ def _main_layout(user):
                     style={"marginBottom": "2px"}),
             html.Div("ranked by risk — click a row to inspect",
                      className="sub-note"),
+            _filter_bar(),
             html.Div(id="table-note", className="kpi-caption"),
             dash_table.DataTable(id="cpty-table", sort_action="native",
-                                 filter_action="native", page_size=12,
+                                 page_size=12, cell_selectable=True,
                                  export_format="csv", **_table_styles()),
         ], className="card", style={"marginTop": "12px"}),
         dcc.Store(id="theme-store", data="light"),
@@ -1544,14 +1708,12 @@ def _conclusion_actions(n_refresh, n_save, text, case_id, bump):
 @app.callback(
     Output("graph", "elements"), Output("graph", "stylesheet"),
     Output("graph", "layout"),
-    Output("cpty-table", "data"), Output("cpty-table", "columns"),
     Output("decision-panel", "children"), Output("quickstats-panel", "children"),
     Output("graph-caption", "children"),
     Output("drivers-card", "children"), Output("paths-card-content", "children"),
     Output("node-search", "options"), Output("root", "className"),
-    Output("view-sig", "data"), Output("table-note", "children"),
-    Output("cpty-table", "filter_query"), Output("cpty-table", "sort_by"),
-    Output("node-search", "value"),
+    Output("view-sig", "data"),
+    Output("cpty-table", "sort_by"), Output("node-search", "value"),
     Input("case", "value"), Input("top-n", "value"), Input("min-risk", "value"),
     Input("edge-kinds", "value"), Input("layout-mode", "value"),
     Input("highlight-path", "value"), Input("theme-store", "data"),
@@ -1565,37 +1727,92 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
                            edge_kinds or [], expanded,
                            highlight=bool(highlight),
                            mode=view_mode or "entities")
-    frame, total_cpty = _counterparty_frame(case_id)
-    table_note = ("top %s of %s counterparties by risk — use the search or "
-                  "filters to reach the rest"
-                  % (format(len(frame), ","), format(total_cpty, ","))
-                  if total_cpty > len(frame) else "")
     ranked_nodes = sorted(r["ego"].nodes(data=True),
                           key=lambda t: t[1].get("final_risk", 0), reverse=True)
     search_opts = [{"label": "%s (%s)" % (a.get("name") or _display_id(n, a),
                                           _display_id(n, a)),
                     "value": n}
                    for n, a in ranked_nodes[:config.SEARCH_MAX_OPTIONS]]
-    # analytic state (table filter/sort, search) resets on case switch only
+    # table sort + graph search reset on case switch only
     try:
         trigger = dash.callback_context.triggered_id
     except Exception:  # outside a live callback (unit tests) -> initial load
         trigger = None
     if trigger in (None, "case"):
-        filter_q, sort_by, search_val = "", [], None
+        sort_by, search_val = [], None
     else:
-        filter_q = sort_by = search_val = dash.no_update
+        sort_by = search_val = dash.no_update
 
     view_sig = json.dumps([case_id, top_n, min_risk, sorted(edge_kinds or []),
                            layout_mode, sorted(expanded or []),
                            bool(highlight), view_mode])
     return (els, _stylesheet(theme), _layout_spec(layout_mode, ev["subject_id"]),
-            frame.to_dict("records"), _table_columns(frame),
             _decision_panel(case_id, ev), _quickstats_panel(ev),
             _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,
-            "theme-%s" % theme, view_sig, table_note,
-            filter_q, sort_by, search_val)
+            "theme-%s" % theme, view_sig, sort_by, search_val)
+
+
+# ---- counterparty table: server-side custom filtering + row selection ----
+@app.callback(
+    Output("cpty-table", "data"), Output("cpty-table", "columns"),
+    Output("table-note", "children"), Output("cpty-table", "active_cell"),
+    Input("case", "value"),
+    Input("flt-text", "value"), Input("flt-decision", "value"),
+    Input("flt-type", "value"), Input("flt-alerted", "value"),
+    Input("flt-risk-op", "value"), Input("flt-risk-val", "value"),
+    Input("flt-amt-op", "value"), Input("flt-amt-val", "value"),
+    Input("flt-txn-op", "value"), Input("flt-txn-val", "value"),
+    Input("flt-first", "start_date"), Input("flt-first", "end_date"),
+    Input("flt-last", "start_date"), Input("flt-last", "end_date"),
+)
+def _filter_table(case_id, text, decisions, type_, alerted, risk_op, risk_val,
+                  amt_op, amt_val, txn_op, txn_val, f_from, f_to, l_from, l_to):
+    frame, total = _counterparty_frame(case_id)
+    filtered = _apply_filters(
+        frame, text=text, decisions=decisions, type_=type_,
+        alerted_only=bool(alerted), risk_op=risk_op, risk_val=risk_val,
+        amt_op=amt_op, amt_val=amt_val, txn_op=txn_op, txn_val=txn_val,
+        first_from=f_from, first_to=f_to, last_from=l_from, last_to=l_to)
+    active = any([text and str(text).strip(), decisions, type_, alerted,
+                  risk_val not in (None, ""), amt_val not in (None, ""),
+                  txn_val not in (None, ""), f_from, f_to, l_from, l_to])
+    if active:
+        note = "showing %s of %s counterparties (filtered)" % (
+            format(len(filtered), ","), format(total, ","))
+    elif total > len(frame):
+        note = ("top %s of %s counterparties by risk — filter to reach the rest"
+                % (format(len(frame), ","), format(total, ",")))
+    else:
+        note = ""
+    # clearing active_cell drops any stale row highlight after a filter change
+    return filtered.to_dict("records"), _table_columns(filtered), note, None
+
+
+@app.callback(
+    Output("flt-text", "value"), Output("flt-decision", "value"),
+    Output("flt-type", "value"), Output("flt-alerted", "value"),
+    Output("flt-risk-op", "value"), Output("flt-risk-val", "value"),
+    Output("flt-amt-op", "value"), Output("flt-amt-val", "value"),
+    Output("flt-txn-op", "value"), Output("flt-txn-val", "value"),
+    Output("flt-first", "start_date"), Output("flt-first", "end_date"),
+    Output("flt-last", "start_date"), Output("flt-last", "end_date"),
+    Input("case", "value"), Input("flt-clear", "n_clicks"),
+)
+def _reset_table_filters(case_id, n_clear):
+    """Reset all filter controls — on Clear, and on case switch (analytic
+    state must not leak across investigations)."""
+    return ("", [], None, [], "gte", None, "gte", None, "gte", None,
+            None, None, None, None)
+
+
+@app.callback(
+    Output("cpty-table", "style_data_conditional"),
+    Input("cpty-table", "active_cell"),
+)
+def _highlight_row(active_cell):
+    row = active_cell.get("row") if active_cell else None
+    return _row_conditional(row)
 
 
 @app.callback(

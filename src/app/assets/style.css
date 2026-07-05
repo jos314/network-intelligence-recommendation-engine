@@ -11,6 +11,7 @@
   --risk-yellow: #d99a1f;
   --risk-yellow-text: #8a6510;  /* readable yellow for text on light bg */
   --ok-green: #3d9a63;
+  --row-sel: rgba(76, 127, 214, 0.14);  /* selected table row tint */
   --shadow: 0 1px 3px rgba(16, 20, 28, 0.08);
 }
 .theme-dark {
@@ -25,6 +26,7 @@
   --risk-yellow: #e6b23c;
   --risk-yellow-text: #e6b23c;
   --ok-green: #4fb87a;
+  --row-sel: rgba(107, 154, 234, 0.20);
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
@@ -110,6 +112,41 @@
 }
 button.btn-xs { padding: 3px 9px; font-size: 11px; }
 .sub-note { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+
+/* counterparty table filter bar */
+.filter-bar { margin-bottom: 10px; }
+.flt-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.flt-text {
+  flex: 1 1 220px; min-width: 180px; padding: 7px 11px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); color: var(--text); outline: none;
+}
+.flt-text:focus { border-color: var(--accent); }
+.flt-lbl { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.flt-num {
+  width: 88px; padding: 6px 9px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); color: var(--text); outline: none;
+}
+.flt-num:focus { border-color: var(--accent); }
+.flt-op { width: 58px; }
+.flt-dd { width: 150px; }
+.flt-chk { font-size: 12px; color: var(--text); }
+.filter-bar details.adv { margin-top: 8px; }
+
+/* dcc.DatePickerRange theming (its own DOM; theme the inputs at least) */
+.flt-date { display: inline-block; }
+.flt-date .DateRangePickerInput {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.flt-date .DateInput { background: transparent; width: 92px; }
+.flt-date .DateInput_input {
+  background: transparent; color: var(--text); font-size: 12px;
+  padding: 5px 8px; font-weight: 400;
+}
+.flt-date .DateRangePickerInput_arrow { padding: 0 2px; }
+.flt-date .DateInput_input__focused { border-bottom: 2px solid var(--accent); }
 
 details.adv summary {
   color: var(--muted); font-size: 11.5px; cursor: pointer;
