@@ -44,9 +44,15 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 * **Key risk paths card** — propagated-risk chains, shared-attribute links,
   download buttons (evidence pack JSON, conclusion prompt MD).
 * **Table card** — every counterparty with **type, total amount, # txns,
-  first/last seen, % of subject flow (direct counterparties only)**;
-  sortable/filterable, CSV export; **click a row to inspect it** (rows
-  beyond the depth slider are revealed in the graph automatically).
+  first/last seen, % of subject flow (direct counterparties only)**; native
+  sort, CSV export (of the filtered set), and **click any cell to select
+  and inspect the whole row**. Its **custom filter bar** replaces Dash's
+  native filter: a case-insensitive text search (entity or id), Decision /
+  Type / alerted-only pickers, a **Clear filters** button, and (under "More
+  filters") numeric **operator dropdowns** (≥ > = < ≤) for Risk / Amount /
+  # Txns and **date-range pickers** for First/Last seen — leave one side
+  blank for a one-sided before/after, fill both for a between window. All
+  filters reset on case switch.
 
 ## Honesty rules (what the screen refuses to fake)
 
