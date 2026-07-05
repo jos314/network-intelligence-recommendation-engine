@@ -90,7 +90,9 @@ def test_placement_hints_deterministic():
 
 
 def test_isolate_expansion_lens():
-    """Isolate shows subject + parents + children + back-link nodes only."""
+    """The lens EMPHASIZES the trail — it never removes anything. Trail
+    nodes stay unclassed, back-links go .lensmid, the rest .lensbg, and the
+    node set is IDENTICAL to the un-lensed view."""
     for cid in CASES:
         ego = _result(cid)["ego"]
         pair = None
@@ -103,22 +105,37 @@ def test_isolate_expansion_lens():
             continue
         parent, child = pair
         seed = ego.graph["seed"]
+        expanded = {child: parent, parent: None}
         els, stats = _elements(cid, 25, 0.0, ["txn", "identity"],
-                               expanded={child: parent, parent: None},
-                               isolate=True)
-        assert stats["isolated"]
-        ids = {e["data"]["id"] for e in els if "source" not in e["data"]}
-        assert {seed, parent, child} <= ids
-        # nothing outside the lens: every visible node is core or back-link
-        core = {seed, parent, child}
-        for n in ids - core:
-            nbrs = set(ego.successors(child)) | set(ego.predecessors(child)) \
-                | set(ego.successors(parent)) | set(ego.predecessors(parent))
-            assert n in nbrs or ego.nodes[n].get("hop") == 1
-        # isolate off -> normal view is a superset
+                               expanded=expanded, isolate=True)
         els_full, stats_full = _elements(cid, 25, 0.0, ["txn", "identity"],
-                                         expanded={child: parent, parent: None})
-        assert not stats_full["isolated"]
+                                         expanded=expanded)
+        assert stats["isolated"] and not stats_full["isolated"]
+        nodes = {e["data"]["id"]: e for e in els if "source" not in e["data"]}
+        full_ids = {e["data"]["id"] for e in els_full if "source" not in e["data"]}
+        # nothing removed: identical node sets with and without the lens
+        assert set(nodes) == full_ids
+        # the trail keeps full brightness (no lens class)
+        for t in (seed, parent, child):
+            assert "lens" not in nodes[t].get("classes", "")
+        # every non-trail node is classified, and the tiers add up
+        trail = {seed, parent, child}
+        for n, e in nodes.items():
+            if n not in trail:
+                assert "lensmid" in e["classes"] or "lensbg" in e["classes"]
+        assert (stats["lens_trail"] + stats["lens_backlinks"]
+                + stats["lens_faded"]) == stats["nodes_shown"]
+        # edge tiers: an edge with both ends on the trail carries no lens
+        # class; an edge with no trail end is faded
+        for e in els:
+            d = e["data"]
+            if "source" not in d:
+                continue
+            u, v = d["source"], d["target"]
+            if u in trail and v in trail:
+                assert "lens" not in e.get("classes", "")
+            elif u not in trail and v not in trail:
+                assert "lensbg" in e.get("classes", "")
         return
     pytest.skip("no hop1-hop2 adjacency in fixture egos")
 

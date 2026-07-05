@@ -25,6 +25,11 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 
 * **Header** (sticky) — case selector, signed-in user chip, sign out,
   dark/light toggle (☾/☀).
+* **Scoring overlay** — the first open of a case builds and scores its full
+  network (up to ~1 min at full scale); a spinner card over the graph says
+  exactly that. Quick re-renders never flash it (600 ms show-delay). The
+  login screen shows the demo credentials whenever the demo fallback is the
+  only credential source.
 * **KPI row** — case decision (with an "escalated by network evidence" tag
   when the network raised it above the subject's own band), risk gauge with
   **threshold ticks at t1/t2** and the band caption, alerted-within-2-hops
@@ -66,6 +71,10 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
   caption counts whatever remains hidden.
 * **Alert recency**: the extract carries no alert dates; every label says
   "recency unknown" instead of implying freshness.
+* **Threshold display**: the shown score always sits on the same side of
+  the decision thresholds as the true score — precision grows as needed, so
+  "0.750 · EDD" can never appear beside "≥ 0.75 SAR" (that score renders as
+  0.7496).
 
 ## Graph encodings
 
@@ -85,7 +94,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | Control | What it does |
 |---|---|
 | entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view) |
-| isolate expansions | the expansion lens: only subject + drilled parents + revealed children + the earlier-hop nodes they connect back to; only expansion-relevant edges draw. **Disabled (with a tooltip) until an expansion exists**, and unticks itself when expansions are reset — it can never silently do nothing |
+| highlight expansions | the expansion lens — **emphasis, never removal**: the whole graph stays visible; the trail (subject → drilled parents → revealed children) keeps full brightness, back-links go half-lit, everything else fades to a small quiet ghost. The caption reports the three tiers. **Disabled (with a tooltip) until an expansion exists**, and unticks itself when expansions are reset — it can never silently do nothing |
 | Show top (10/25/50/100) | how many of the subject's riskiest DIRECT counterparties form the baseline view |
 | Min risk | live-filters the view while dragging. **Alerted entities are exempt** (an alert can never be filtered off screen), so on an alert-heavy case the picture may not change — the caption then says "N alerted kept despite min-risk X" |
 | **double-click a node** | reveals that node's own top-K riskiest counterparties (next hop, down to 3) — the core drill-down gesture |
@@ -93,7 +102,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | key risk path | force-draws the top Stage-C path |
 | ◎ Center subject | pans/zooms onto the seed diamond and focuses it |
 | Reset view | entities mode, top 25, min risk 0, no expansions — **and rebuilds the canonical layout from scratch** (subject centred, ring, blooms), discarding every dragged position. This is the rescue hatch: whatever state the canvas is in, Reset view restores a readable graph |
-| Advanced | edge-family toggles and layout modes. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (hop-1 ring, children bloom from their parent) — dragging tugs springs, nothing ever reshuffles; **force** = static; **rings** = concentric by hop |
+| Advanced | edge-family toggles and layout modes. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (hop-1 ring, children bloom from their parent) — dragging tugs springs, nothing ever reshuffles. The sim is energy-bounded: stacked nodes get a gentle constant push (never a 1/d² catapult) and per-tick velocity is capped, so no state can fling nodes off-canvas; **force** = static; **rings** = concentric by hop |
 | click a node / edge / cluster / table row | inspects it (the camera never moves on click) |
 | Search entity… | focus any scored node by name/id |
 

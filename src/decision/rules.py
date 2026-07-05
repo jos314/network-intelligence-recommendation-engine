@@ -33,8 +33,18 @@ def node_decision(attrs: dict) -> dict:
                        "other high-risk entities (proximity %.2f ≥ %.2f) — at least EDD"
                        % (attrs.get("prop_risk", 0.0), config.OVERRIDE_PROP_RISK))
 
-    # 2 — threshold bands
-    p_txt = ("%.3f" if p > 0.985 or p < 0.015 else "%.2f") % p  # no false 1.00
+    # 2 — threshold bands. Precision grows until the DISPLAYED score sits on
+    # the same side of both thresholds as the true score: "0.75 falls in the
+    # EDD band (0.40-0.75)" for p=0.7496 read as a contradiction. Also never
+    # round to a false 1.00 / 0.00 at the extremes.
+    p_txt = "%.4f" % p
+    for fmt in (("%.3f",) if p > 0.985 or p < 0.015 else ("%.2f", "%.3f")):
+        cand = fmt % p
+        shown = float(cand)
+        if ((shown >= config.DECISION_T1) == (p >= config.DECISION_T1)
+                and (shown >= config.DECISION_T2) == (p >= config.DECISION_T2)):
+            p_txt = cand
+            break
     if p >= config.DECISION_T2:
         band = config.DECISION_SAR
         reasons.append("Risk score %s is at or above the SAR threshold (%.2f)"

@@ -166,8 +166,48 @@ details.adv summary:hover { color: var(--accent); }
 .main-row > .card-side { flex: 1 1 300px; min-width: 0; }
 .cards-row > .card { flex: 1 1 340px; min-width: 0; }
 
-.controls { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-bottom: 6px; }
+.controls { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; font-size: 12px; margin-bottom: 8px; }
 .controls .ctl-label { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
+
+/* toolbar groups: view | lenses | actions — one glance says what lives where */
+.ctl-group {
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  padding: 9px 12px 6px 10px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--panel); position: relative;
+  margin-top: 5px;
+}
+.ctl-group-label {
+  color: var(--muted); font-size: 9px; letter-spacing: 0.09em;
+  text-transform: uppercase; user-select: none;
+  position: absolute; top: -7px; left: 10px;
+  background: var(--panel); padding: 0 5px; border-radius: 4px;
+}
+.controls > .adv { align-self: center; margin-top: 5px; }
+.btn-expand { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* min-risk slider value bubble follows the theme */
+.rc-slider-tooltip-inner {
+  background: var(--panel-2) !important; color: var(--text) !important;
+  border: 1px solid var(--border) !important; box-shadow: none !important;
+  font-size: 11px !important;
+}
+.rc-slider-tooltip-arrow { display: none !important; }
+
+/* scoring overlay: the one legitimate long wait must explain itself */
+.spinner-card {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 22px 28px; max-width: 340px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+.spin-ring {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 3px solid var(--panel-2); border-top-color: var(--accent);
+  animation: spin-ring 0.9s linear infinite;
+}
+@keyframes spin-ring { to { transform: rotate(360deg); } }
+.spin-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.spin-sub { font-size: 11.5px; color: var(--muted); text-align: center; line-height: 1.45; }
 
 .legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 11.5px; padding-top: 8px; border-top: 1px solid var(--border); }
 .legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
@@ -294,6 +334,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .login-btn { width: 100%; padding: 9px 12px; font-size: 13px; margin-top: 4px; }
 .login-error { color: var(--risk-red); font-size: 12px; min-height: 18px; margin-top: 10px; }
+.login-hint {
+  color: var(--muted); font-size: 11.5px; margin-top: 12px; padding: 6px 10px;
+  border: 1px dashed var(--border); border-radius: 8px; background: var(--panel-2);
+}
 
 .user-chip {
   color: var(--muted); font-size: 12.5px; padding: 5px 10px;

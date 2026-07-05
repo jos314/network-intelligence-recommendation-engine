@@ -42,7 +42,7 @@ from ..data_access import DataAccess
 from ..explain.paths import key_paths
 from ..graph.ego import node_flow_summary
 from ..ingest.crosswalk import NODE_EXTERNAL
-from .auth import verify_credentials
+from .auth import demo_active, verify_credentials
 
 # ------------------------------------------------- cytoscape-side palette
 # (the canvas cannot read CSS variables; everything else themes via assets/)
@@ -135,6 +135,17 @@ def _stylesheet(theme):
             "line-color": ACCENT[theme], "target-arrow-color": ACCENT[theme],
             "opacity": 0.85, "z-index": 5,
         }},
+        # the expansion lens: emphasis, never removal — the trail keeps full
+        # brightness, back-links go half-lit, everything else recedes into
+        # a small quiet ghost (context stays, noise doesn't)
+        {"selector": "node.lensbg", "style": {
+            "opacity": 0.16, "text-opacity": 0,
+            "width": "mapData(risk, 0, 1, 7, 16)",
+            "height": "mapData(risk, 0, 1, 7, 16)",
+        }},
+        {"selector": "node.lensmid", "style": {"opacity": 0.55}},
+        {"selector": "edge.lensbg", "style": {"opacity": 0.06}},
+        {"selector": "edge.lensmid", "style": {"opacity": 0.35}},
         # focus mode: everything outside subject -> focus -> its children
         # fades back (tap empty canvas to clear)
         {"selector": ".dimmed", "style": {
@@ -347,37 +358,22 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     visible, hidden_flagged = set(), 0
     path_revealed, alert_exempt = 0, 0
     isolated = bool(isolate) and bool(expanded)
-    if isolated:
-        # the expansion lens: subject + drilled parents + revealed children
-        # + the already-visible lower-depth nodes those children connect
-        # back to (n(2,3)-n(1,15), n(2,4)-n(0,1) style back-links)
-        core = {seed} | expanded | {p for p in parents.values() if p in ego.nodes}
-        top_set = set(top_hop1)
-        back_links = set()
-        for child in expanded:
-            if child not in ego.nodes:
-                continue
-            for nb in set(ego.successors(child)) | set(ego.predecessors(child)):
-                if nb in top_set or nb == seed:
-                    back_links.add(nb)
-        visible = {n for n in core | back_links if n in ego.nodes}
-    else:
-        for n in baseline:
-            if n not in ego.nodes:
-                continue
-            a = ego.nodes[n]
-            forced = n == seed or n in expanded or n in path_nodes
-            below_cut = a.get("final_risk", 0.0) < min_risk
-            if below_cut and not (forced or a.get("alerted")):
-                if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
-                    hidden_flagged += 1
-                continue
-            if below_cut and not forced and a.get("alerted"):
-                alert_exempt += 1  # kept ONLY because alerted — disclose it
-            if n in path_nodes and n not in expanded and n != seed \
-                    and n not in top_hop1:
-                path_revealed += 1
-            visible.add(n)
+    for n in baseline:
+        if n not in ego.nodes:
+            continue
+        a = ego.nodes[n]
+        forced = n == seed or n in expanded or n in path_nodes
+        below_cut = a.get("final_risk", 0.0) < min_risk
+        if below_cut and not (forced or a.get("alerted")):
+            if a.get("decision") in (config.DECISION_EDD, config.DECISION_SAR):
+                hidden_flagged += 1
+            continue
+        if below_cut and not forced and a.get("alerted"):
+            alert_exempt += 1  # kept ONLY because alerted — disclose it
+        if n in path_nodes and n not in expanded and n != seed \
+                and n not in top_hop1:
+            path_revealed += 1
+        visible.add(n)
 
     alerted_offscreen = sum(1 for n, a in ego.nodes(data=True)
                             if a.get("alerted") and n not in visible)
@@ -394,6 +390,24 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         budget = max(config.RENDER_MAX_NODES - len(must), 0)
         render_capped = len(rest) - budget
         visible = must | set(rest[:budget])
+
+    # -------- the expansion lens: EMPHASIS, never removal ---------------
+    # In dense alert rings the removable set is ~empty, so a removal lens
+    # read as "the toggle does nothing". Instead everything stays visible:
+    #   trail (subject + drilled parents + revealed children) -> full
+    #   back-links (visible nodes the children connect to)    -> half-lit
+    #   everything else                                       -> faded ghost
+    lens_trail = lens_mid = None
+    if isolated:
+        lens_trail = ({seed} | expanded
+                      | {p for p in parents.values() if p}) & visible
+        lens_mid = set()
+        for child in expanded:
+            if child not in ego.nodes:
+                continue
+            for nb in set(ego.successors(child)) | set(ego.predecessors(child)):
+                if nb in visible and nb not in lens_trail:
+                    lens_mid.add(nb)
 
     # -------- deterministic placement hints (no reshuffle, ever) --------
     # seed at origin; hop-1 on a risk-ranked ring; expansion children fan
@@ -430,6 +444,8 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         classes = []
         if n in path_nodes:
             classes.append("onpath")
+        if lens_trail is not None and n not in lens_trail:
+            classes.append("lensmid" if n in lens_mid else "lensbg")
         if n not in hints:  # e.g. back-link nodes in isolate mode
             ang = (sum(ord(c) for c in n) % 360) * math.pi / 180
             hints[n] = (430 * math.cos(ang), 430 * math.sin(ang))
@@ -448,18 +464,25 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
             data["kidx"] = kidx.get(n, 0)
         els.append({"data": data, "classes": " ".join(classes)})
 
+    def _lens_edge_class(u, v):
+        """Trail edges stay bright, child->back-link edges half-lit, the
+        rest fades — the lens dims, it never deletes."""
+        if lens_trail is None:
+            return None
+        if u in lens_trail and v in lens_trail:
+            return None
+        if (u in lens_trail and v in lens_mid) \
+                or (v in lens_trail and u in lens_mid):
+            return "lensmid"
+        return "lensbg"
+
     # aggregate parallel edges: txn per (u, v); identity per (u, v, kind)
-    lens_core = ({seed} | expanded | set(parents.values())) if isolated else None
     txn_groups, ident_groups, total_groups = {}, {}, set()
     for u, v, d in ego.edges(data=True):
         kind = d.get("kind")
         gkey = (u, v) if kind == "txn" else (u, v, kind)
         total_groups.add((kind == "txn", gkey))
         if u not in visible or v not in visible:
-            continue
-        # the isolate lens draws only expansion-relevant edges — links
-        # among the back-link nodes themselves are the old clutter
-        if lens_core is not None and u not in lens_core and v not in lens_core:
             continue
         family = "txn" if kind == "txn" else "identity"
         if family not in edge_kinds:
@@ -490,6 +513,9 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
             classes.append("onpath")
         if frozenset((u, v)) in tree_pairs:
             classes.append("treeedge")
+        lens_cls = _lens_edge_class(u, v)
+        if lens_cls:
+            classes.append(lens_cls)
         els.append({"data": {
             "source": u, "target": v, "kind": "txn",
             "weight": round(min(g["amount"] / max_amt, 1.0), 3),
@@ -498,10 +524,14 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
             "src_country": g["src_country"], "dst_country": g["dst_country"],
         }, "classes": " ".join(classes)})
     for (u, v, kind), g in ident_groups.items():
+        icls = ["treeedge"] if frozenset((u, v)) in tree_pairs else []
+        lens_cls = _lens_edge_class(u, v)
+        if lens_cls:
+            icls.append(lens_cls)
         els.append({"data": {"source": u, "target": v, "kind": kind,
                              "weight": round(min(g["weight"], 1.0), 3),
                              "value": g["value"]},
-                    "classes": "treeedge" if frozenset((u, v)) in tree_pairs else ""})
+                    "classes": " ".join(icls)})
 
     stats = {
         "mode": "entities", "isolated": isolated,
@@ -515,6 +545,10 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         "alerted_offscreen": alerted_offscreen, "hidden_flagged": hidden_flagged,
         "alert_exempt": alert_exempt, "min_risk": float(min_risk or 0.0),
         "path_revealed": path_revealed, "render_capped": render_capped,
+        "lens_trail": len(lens_trail) if isolated else 0,
+        "lens_backlinks": len(lens_mid) if isolated else 0,
+        "lens_faded": (len(visible) - len(lens_trail) - len(lens_mid)
+                       if isolated else 0),
     }
     return els, stats
 
@@ -825,7 +859,18 @@ def _decision_panel(case_id, ev):
             else "var(--ok-green)")
     near_threshold = min(abs(p - config.DECISION_T1), abs(p - config.DECISION_T2)) < 0.02
     near_extreme = p > 0.985 or p < 0.015  # never round to a false 1.00 / 0.00
-    p_text = ("%.3f" if near_threshold or near_extreme else "%.2f") % p
+    # precision grows until the DISPLAYED value sits on the same side of
+    # both thresholds as the true score — "0.750 · EDD" next to "≥ 0.75 SAR"
+    # reads as a contradiction (the score was 0.7496)
+    p_text = "%.4f" % p
+    for fmt in (("%.3f",) if near_threshold or near_extreme
+                else ("%.2f", "%.3f")):
+        cand = fmt % p
+        shown = float(cand)
+        if ((shown >= config.DECISION_T1) == (p >= config.DECISION_T1)
+                and (shown >= config.DECISION_T2) == (p >= config.DECISION_T2)):
+            p_text = cand
+            break
     calibration = DA.calibration()
     calibrated = bool(calibration.get("calibrated"))
     score_label = "Calibrated risk" if calibrated else "Risk score (uncalibrated)"
@@ -1155,12 +1200,16 @@ def _graph_caption(stats, ego):
         return parts
 
     if stats.get("isolated"):
-        # the lens hides on purpose — keep the caption to what it shows
+        # the lens dims, it never deletes — the caption says exactly that
         return [html.Span(
-            "isolated expansion view: %d nodes — drilled parents, revealed "
-            "children, and the earlier-hop nodes they connect back to "
-            "(untick to return to the full view)"
-            % stats["nodes_shown"], className="caption-note")]
+            "expansion lens: %d on the trail · %d back-links half-lit · "
+            "%d context entities faded — nothing is removed"
+            % (stats["lens_trail"], stats["lens_backlinks"],
+               stats["lens_faded"]),
+            className="caption-note",
+            title="Trail = subject, drilled parents and revealed children. "
+                  "Back-links are the visible entities those children also "
+                  "connect to. Untick to restore full brightness.")]
     parts = [html.Span(
         "top %d of %s direct counterparties by risk"
         % (stats["hop1_shown"], format(stats["hop1_total"], ","))
@@ -1212,13 +1261,14 @@ def _graph_caption(stats, ego):
 def _isolate_options(enabled):
     """The expansion lens is meaningless without an expansion — say so on
     the control itself instead of silently doing nothing."""
-    return [{"label": " isolate expansions", "value": "on",
+    return [{"label": " highlight expansions", "value": "on",
              "disabled": not enabled,
-             "title": ("reduce the view to the expansion trails: subject, "
-                       "drilled parents, revealed children and their "
-                       "back-links" if enabled else
+             "title": ("keep the whole graph but light the expansion trail: "
+                       "subject → drilled parents → children stay bright, "
+                       "back-links half-lit, everything else fades"
+                       if enabled else
                        "expand a node first (double-click one, or use the "
-                       "Expand button) — this lens isolates expansions")}]
+                       "Expand button) — this lens highlights expansions")}]
 
 
 LEGEND = html.Div([
@@ -1338,6 +1388,10 @@ def _login_view():
         html.Button("Sign in", id="login-btn", n_clicks=0,
                     className="btn btn-primary login-btn"),
         html.Div(id="login-error", className="login-error"),
+        # only rendered while the demo fallback is the sole credential
+        # source — a teammate must never face a password box with no password
+        html.Div("demo access — analyst / riskdemo", className="login-hint")
+        if demo_active() else None,
     ], className="login-card card"), className="login-wrap")
 
 
@@ -1377,37 +1431,56 @@ def _main_layout(user):
         html.Div([
             html.Div([
                 html.Div([
-                    dcc.RadioItems(id="view-mode",
-                                   options=[{"label": " entities", "value": "entities"},
-                                            {"label": " clusters", "value": "clusters"}],
-                                   value="entities", inline=True),
-                    html.Div([html.Div("Show top", className="ctl-label"),
-                              dcc.Dropdown(id="top-n",
-                                           options=[{"label": str(n), "value": n}
-                                                    for n in config.TOP_N_OPTIONS],
-                                           value=config.TOP_N_DEFAULT, clearable=False,
-                                           style={"width": "80px"})]),
-                    html.Div([html.Div("Min risk", className="ctl-label"),
-                              dcc.Slider(id="min-risk", min=0, max=1, step=0.05,
-                                         value=0.0, updatemode="drag",
-                                         marks={0: "0", 0.5: "0.5", 1: "1"})],
-                             style={"width": "150px"}),
-                    dcc.Checklist(id="highlight-path",
-                                  options=[{"label": " key risk path",
-                                            "value": "on"}], value=[], inline=True),
-                    dcc.Checklist(id="isolate-exp",
-                                  options=_isolate_options(False), value=[],
-                                  inline=True, className="ctl-tip"),
-                    html.Button("◎ Center subject", id="center-btn", className="btn",
-                                n_clicks=0),
-                    html.Button("Reset view", id="reset-view-btn",
-                                className="btn", n_clicks=0),
-                    html.Button("Expand next hop", id="expand-btn",
-                                className="btn", n_clicks=0,
-                                title="Reveal the focused node's top "
-                                      "counterparties (same as double-click)"),
-                    html.Button("Reset expansion", id="reset-expand-btn",
-                                className="btn", n_clicks=0),
+                    html.Div([
+                        html.Div("view", className="ctl-group-label"),
+                        dcc.RadioItems(id="view-mode",
+                                       options=[{"label": " entities",
+                                                 "value": "entities"},
+                                                {"label": " clusters",
+                                                 "value": "clusters"}],
+                                       value="entities", inline=True),
+                        html.Div([html.Div("Show top", className="ctl-label"),
+                                  dcc.Dropdown(id="top-n",
+                                               options=[{"label": str(n), "value": n}
+                                                        for n in config.TOP_N_OPTIONS],
+                                               value=config.TOP_N_DEFAULT,
+                                               clearable=False,
+                                               style={"width": "80px"})]),
+                        html.Div([html.Div("Min risk", className="ctl-label"),
+                                  dcc.Slider(id="min-risk", min=0, max=1,
+                                             step=0.05, value=0.0,
+                                             updatemode="drag",
+                                             tooltip={"placement": "bottom"},
+                                             marks={0: "0", 0.5: "0.5", 1: "1"})],
+                                 style={"width": "150px"}),
+                    ], className="ctl-group"),
+                    html.Div([
+                        html.Div("lenses", className="ctl-group-label"),
+                        dcc.Checklist(id="highlight-path",
+                                      options=[{"label": " key risk path",
+                                                "value": "on"}],
+                                      value=[], inline=True),
+                        dcc.Checklist(id="isolate-exp",
+                                      options=_isolate_options(False), value=[],
+                                      inline=True, className="ctl-tip"),
+                    ], className="ctl-group"),
+                    html.Div([
+                        html.Div("actions", className="ctl-group-label"),
+                        html.Button("◎ Center subject", id="center-btn",
+                                    className="btn", n_clicks=0),
+                        html.Button("Reset view", id="reset-view-btn",
+                                    className="btn", n_clicks=0,
+                                    title="Back to the default view AND the "
+                                          "canonical layout — the rescue "
+                                          "hatch if the graph gets messy"),
+                        html.Button("Expand next hop", id="expand-btn",
+                                    className="btn btn-expand", n_clicks=0,
+                                    title="Reveal the focused node's top "
+                                          "counterparties (same as "
+                                          "double-click)"),
+                        html.Button("Reset expansion", id="reset-expand-btn",
+                                    className="btn", n_clicks=0),
+                    ], className="ctl-group ctl-actions"),
                     html.Details([
                         html.Summary("Advanced"),
                         html.Div([
@@ -1428,14 +1501,32 @@ def _main_layout(user):
                         ], className="controls", style={"paddingTop": "8px"}),
                     ], className="adv"),
                 ], className="controls"),
-                cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
-                               style={"width": "100%", "height": "500px"},
-                               elements=[], stylesheet=_stylesheet("light"),
-                               responsive=True,
-                               # a degenerate fit (all nodes stacked) must
-                               # never be able to wedge the canvas at an
-                               # unusable zoom
-                               minZoom=0.03, maxZoom=4),
+                dcc.Loading(
+                    cyto.Cytoscape(id="graph", layout=_layout_spec("force", ""),
+                                   # taller screens get a taller canvas — the
+                                   # graph is the workspace's centrepiece
+                                   style={"width": "100%",
+                                          "height": "clamp(460px, 56vh, 760px)"},
+                                   elements=[], stylesheet=_stylesheet("light"),
+                                   responsive=True,
+                                   # a degenerate fit (all nodes stacked) must
+                                   # never be able to wedge the canvas at an
+                                   # unusable zoom
+                                   minZoom=0.03, maxZoom=4),
+                    # first open of a case scores its whole network — up to
+                    # ~1 min at full scale. Never leave that wait silent.
+                    # delay_show keeps quick re-renders (sliders) flicker-free
+                    delay_show=600, delay_hide=150,
+                    overlay_style={"visibility": "visible", "opacity": 0.45},
+                    custom_spinner=html.Div([
+                        html.Div(className="spin-ring"),
+                        html.Div("Scoring the network…", className="spin-title"),
+                        html.Div("first open of a case builds and scores its "
+                                 "full counterparty network — up to a minute "
+                                 "at full scale; later opens are instant",
+                                 className="spin-sub"),
+                    ], className="spinner-card"),
+                ),
                 html.Div(id="graph-caption", className="graph-caption"),
                 LEGEND,
             ], className="card card-graph"),
@@ -1681,7 +1772,11 @@ app.clientside_callback(
                             let d2 = dx * dx + dy * dy;
                             if (d2 < 0.01) { dx = 0.1 * (i - j); dy = 0.1; d2 = dx * dx + dy * dy; }
                             const d = Math.sqrt(d2);
-                            let rep = 5200 / d2;
+                            // stacked pairs (two expansions can fan children
+                            // onto the same spot) get a GENTLE constant push:
+                            // 1/d^2 at d -> 0 was a catapult that flung nodes
+                            // thousands of px off-canvas
+                            let rep = d < 14 ? 90 : 5200 / d2;
                             const minD = a.width() / 2 + b.width() / 2 + 16;
                             if (d < minD) { rep += (minD - d) * 2.2 / d; }
                             const fx = dx / d * rep, fy = dy / d * rep;
@@ -1715,6 +1810,10 @@ app.clientside_callback(
                         v.x = (v.x + f.x * sim.alpha * 0.02) * 0.86;
                         v.y = (v.y + f.y * sim.alpha * 0.02) * 0.86;
                         if (!isFinite(v.x) || !isFinite(v.y)) { v.x = 0; v.y = 0; }
+                        // bounded step: whatever the forces say, nothing is
+                        // ever catapulted across the canvas in one tick
+                        const sp = Math.hypot(v.x, v.y);
+                        if (sp > 36) { v.x *= 36 / sp; v.y *= 36 / sp; }
                         sim.vel[n.id()] = v;
                         const nx = pos[n.id()].x + v.x, ny = pos[n.id()].y + v.y;
                         if (isFinite(nx) && isFinite(ny)) { n.position({x: nx, y: ny}); }

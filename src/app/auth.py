@@ -46,6 +46,15 @@ def load_users() -> dict:
     return {_DEMO_USER: _DEMO_PASSWORD_HASH}
 
 
+def demo_active() -> bool:
+    """True when the demo fallback is the ONLY credential source — the
+    login screen shows the demo credentials instead of stranding teammates
+    in front of a password box with no password."""
+    users_file = config.DATA_DIR / "users.json"
+    return not users_file.exists() and not (
+        os.environ.get("NIRE_USER") and os.environ.get("NIRE_PASSWORD"))
+
+
 def verify_credentials(username, password) -> bool:
     """True iff the username exists and the password hash matches."""
     if not username or not password:

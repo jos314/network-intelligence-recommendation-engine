@@ -61,3 +61,21 @@ def test_calibrator_fallback_with_few_positives():
     cal = Calibrator().fit(raw, y)
     assert not cal.calibrated
     assert list(cal.transform([0.3])) == [0.3]   # documented identity fallback
+
+
+def test_displayed_score_never_contradicts_its_band():
+    """p=0.7496 once displayed as '0.750' beside an EDD decision and a
+    '>= 0.75 SAR' legend — precision must grow until the shown value sits
+    on the same side of both thresholds as the true score."""
+    from src.decision.rules import node_decision
+
+    r = node_decision({"final_risk": 0.7496})
+    band_line = next(x for x in r["reasons"] if "band" in x)
+    assert r["decision"] == config.DECISION_EDD
+    assert "0.7496" in band_line          # not the contradictory "0.750"
+
+    r2 = node_decision({"final_risk": 0.75})
+    assert r2["decision"] == config.DECISION_SAR
+
+    r3 = node_decision({"final_risk": 0.62})   # far from thresholds: 2 dp
+    assert "0.62" in next(x for x in r3["reasons"] if "band" in x)
