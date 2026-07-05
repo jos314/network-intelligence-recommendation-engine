@@ -155,4 +155,9 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 * **Lesson learned (regression-guarded):** never place a callback `Input`
   component inside callback-rendered children — Dash re-fires the callback
   when the component is re-created. The download buttons are static and the
-  download callback additionally requires a real click.
+  download callback additionally requires a real click. **Pattern-matching
+  variant of the same trap:** when a `{"type": …, "index": ALL}` input's
+  component set changes (buttons mount/unmount on a panel re-render), Dash
+  re-fires the callback with an EMPTY `ctx.triggered` — a `trigger is None`
+  branch must `PreventUpdate`, never write state (this once made the
+  cluster-member jump silently undo itself).

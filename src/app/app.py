@@ -1586,6 +1586,16 @@ app.clientside_callback(
                     && cy.nodes('[?is_cluster]').length === 0;
             };
 
+            // A case switch is a NEW investigation: shared counterparties
+            // must not drag positions from the previous subject's frame in.
+            let caseId = null;
+            try { caseId = JSON.parse(sig)[0]; } catch (err) {}
+            if (cy.scratch('_lastCase') !== caseId) {
+                cy.scratch('_lastCase', caseId);
+                cy.scratch('_placed', {});
+                if (cy.__sim) { cy.__sim.vel = {}; }
+            }
+
             // Reset view bumps the nonce: forget every remembered position
             // and velocity so the canonical bloom rebuilds from the hints.
             if (cy.scratch('_lastNonce') !== nonce) {
@@ -1903,7 +1913,14 @@ def _expand(n_expand, n_reset, case_id, active_cell, dbltap, cluster_jumps,
             out.setdefault(child, node)
         return out
 
-    if trigger in (None, "case") or (trigger == "reset-expand-btn" and value):
+    if trigger is None:
+        # Dash re-fires this callback with an EMPTY trigger whenever the
+        # cluster-jump pattern inputs are re-created (the member list mounts
+        # or unmounts on a side-panel re-render). That is not a user action:
+        # treating it as initial-load used to wipe the store and silently
+        # UNDO the jump the user had just made. Only explicit triggers write.
+        raise PreventUpdate
+    if trigger == "case" or (trigger == "reset-expand-btn" and value):
         return {}
     if trigger == "dbltap-store" and value and value.get("id") in ego.nodes:
         return _drill(value["id"])
