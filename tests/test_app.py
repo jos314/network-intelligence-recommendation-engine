@@ -115,27 +115,24 @@ def test_isolate_expansion_lens():
         full_ids = {e["data"]["id"] for e in els_full if "source" not in e["data"]}
         # nothing removed: identical node sets with and without the lens
         assert set(nodes) == full_ids
-        # the trail keeps full brightness (no lens class)
-        for t in (seed, parent, child):
-            assert "lens" not in nodes[t].get("classes", "")
-        # every non-trail node is classified, and the tiers add up
+        # HARD two-tier contrast: trail glows (.lenson), everything else is
+        # a ghost (.lensbg) — no invisible middle tier
         trail = {seed, parent, child}
         for n, e in nodes.items():
-            if n not in trail:
-                assert "lensmid" in e["classes"] or "lensbg" in e["classes"]
-        assert (stats["lens_trail"] + stats["lens_backlinks"]
-                + stats["lens_faded"]) == stats["nodes_shown"]
-        # edge tiers: an edge with both ends on the trail carries no lens
-        # class; an edge with no trail end is faded
+            if n in trail:
+                assert "lenson" in e["classes"] and "lensbg" not in e["classes"]
+            else:
+                assert "lensbg" in e["classes"]
+        assert stats["lens_trail"] + stats["lens_faded"] == stats["nodes_shown"]
+        # edge tiers: trail-trail bright, one-end-on-trail whisper, rest gone
         for e in els:
             d = e["data"]
             if "source" not in d:
                 continue
             u, v = d["source"], d["target"]
-            if u in trail and v in trail:
-                assert "lens" not in e.get("classes", "")
-            elif u not in trail and v not in trail:
-                assert "lensbg" in e.get("classes", "")
+            on_trail = (u in trail) + (v in trail)
+            want = {2: "lenstrail", 1: "lensmid", 0: "lensbg"}[on_trail]
+            assert want in e.get("classes", "")
         return
     pytest.skip("no hop1-hop2 adjacency in fixture egos")
 

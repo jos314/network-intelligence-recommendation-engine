@@ -135,17 +135,22 @@ def _stylesheet(theme):
             "line-color": ACCENT[theme], "target-arrow-color": ACCENT[theme],
             "opacity": 0.85, "z-index": 5,
         }},
-        # the expansion lens: emphasis, never removal — the trail keeps full
-        # brightness, back-links go half-lit, everything else recedes into
-        # a small quiet ghost (context stays, noise doesn't)
-        {"selector": "node.lensbg", "style": {
-            "opacity": 0.16, "text-opacity": 0,
-            "width": "mapData(risk, 0, 1, 7, 16)",
-            "height": "mapData(risk, 0, 1, 7, 16)",
+        # the expansion lens: emphasis, never removal — HARD two-tier
+        # contrast. The trail glows and keeps full colour; everything else
+        # recedes into a small unlabeled ghost. Edges touching the trail
+        # stay as whispers so back-links remain traceable.
+        {"selector": "node.lenson", "style": {
+            "overlay-color": ACCENT[theme], "overlay-opacity": 0.10,
+            "overlay-padding": 5,
         }},
-        {"selector": "node.lensmid", "style": {"opacity": 0.55}},
-        {"selector": "edge.lensbg", "style": {"opacity": 0.06}},
-        {"selector": "edge.lensmid", "style": {"opacity": 0.35}},
+        {"selector": "node.lensbg", "style": {
+            "opacity": 0.12, "text-opacity": 0,
+            "width": "mapData(risk, 0, 1, 6, 13)",
+            "height": "mapData(risk, 0, 1, 6, 13)",
+        }},
+        {"selector": "edge.lenstrail", "style": {"opacity": 0.95, "z-index": 6}},
+        {"selector": "edge.lensmid", "style": {"opacity": 0.22}},
+        {"selector": "edge.lensbg", "style": {"opacity": 0.04}},
         # focus mode: everything outside subject -> focus -> its children
         # fades back (tap empty canvas to clear)
         {"selector": ".dimmed", "style": {
@@ -392,22 +397,16 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         visible = must | set(rest[:budget])
 
     # -------- the expansion lens: EMPHASIS, never removal ---------------
-    # In dense alert rings the removable set is ~empty, so a removal lens
-    # read as "the toggle does nothing". Instead everything stays visible:
+    # Two tiers with HARD contrast (a half-lit middle tier swallowed the
+    # whole graph on dense alert rings and the toggle read as a no-op):
     #   trail (subject + drilled parents + revealed children) -> full
-    #   back-links (visible nodes the children connect to)    -> half-lit
-    #   everything else                                       -> faded ghost
-    lens_trail = lens_mid = None
+    #     brightness plus an accent glow, trail edges bright
+    #   everything else -> small unlabeled ghosts; edges touching the trail
+    #     stay as whispers so back-links remain traceable
+    lens_trail = None
     if isolated:
         lens_trail = ({seed} | expanded
                       | {p for p in parents.values() if p}) & visible
-        lens_mid = set()
-        for child in expanded:
-            if child not in ego.nodes:
-                continue
-            for nb in set(ego.successors(child)) | set(ego.predecessors(child)):
-                if nb in visible and nb not in lens_trail:
-                    lens_mid.add(nb)
 
     # -------- deterministic placement hints (no reshuffle, ever) --------
     # seed at origin; hop-1 on a risk-ranked ring; expansion children fan
@@ -444,8 +443,8 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         classes = []
         if n in path_nodes:
             classes.append("onpath")
-        if lens_trail is not None and n not in lens_trail:
-            classes.append("lensmid" if n in lens_mid else "lensbg")
+        if lens_trail is not None:
+            classes.append("lenson" if n in lens_trail else "lensbg")
         if n not in hints:  # e.g. back-link nodes in isolate mode
             ang = (sum(ord(c) for c in n) % 360) * math.pi / 180
             hints[n] = (430 * math.cos(ang), 430 * math.sin(ang))
@@ -465,14 +464,13 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         els.append({"data": data, "classes": " ".join(classes)})
 
     def _lens_edge_class(u, v):
-        """Trail edges stay bright, child->back-link edges half-lit, the
-        rest fades — the lens dims, it never deletes."""
+        """Trail edges bright, edges touching the trail (back-links) stay
+        as whispers, the rest all but disappears — dim, never delete."""
         if lens_trail is None:
             return None
         if u in lens_trail and v in lens_trail:
-            return None
-        if (u in lens_trail and v in lens_mid) \
-                or (v in lens_trail and u in lens_mid):
+            return "lenstrail"
+        if u in lens_trail or v in lens_trail:
             return "lensmid"
         return "lensbg"
 
@@ -546,9 +544,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
         "alert_exempt": alert_exempt, "min_risk": float(min_risk or 0.0),
         "path_revealed": path_revealed, "render_capped": render_capped,
         "lens_trail": len(lens_trail) if isolated else 0,
-        "lens_backlinks": len(lens_mid) if isolated else 0,
-        "lens_faded": (len(visible) - len(lens_trail) - len(lens_mid)
-                       if isolated else 0),
+        "lens_faded": len(visible) - len(lens_trail) if isolated else 0,
     }
     return els, stats
 
@@ -1202,14 +1198,13 @@ def _graph_caption(stats, ego):
     if stats.get("isolated"):
         # the lens dims, it never deletes — the caption says exactly that
         return [html.Span(
-            "expansion lens: %d on the trail · %d back-links half-lit · "
-            "%d context entities faded — nothing is removed"
-            % (stats["lens_trail"], stats["lens_backlinks"],
-               stats["lens_faded"]),
+            "expansion lens ON: %d trail entities glowing · %d faded to "
+            "ghosts — nothing is removed, untick to restore"
+            % (stats["lens_trail"], stats["lens_faded"]),
             className="caption-note",
-            title="Trail = subject, drilled parents and revealed children. "
-                  "Back-links are the visible entities those children also "
-                  "connect to. Untick to restore full brightness.")]
+            title="Trail = subject, drilled parents and revealed children — "
+                  "full colour with an accent glow. Edges that connect the "
+                  "trail back to the faded context stay as faint whispers.")]
     parts = [html.Span(
         "top %d of %s direct counterparties by risk"
         % (stats["hop1_shown"], format(stats["hop1_total"], ","))
@@ -1258,14 +1253,19 @@ def _graph_caption(stats, ego):
     return parts
 
 
-def _isolate_options(enabled):
-    """The expansion lens is meaningless without an expansion — say so on
-    the control itself instead of silently doing nothing."""
+def _isolate_options(enabled, in_clusters=False):
+    """The expansion lens is meaningless without an expansion (and in the
+    clusters view) — say so on the control instead of silently no-op'ing."""
+    if in_clusters:
+        return [{"label": " highlight expansions", "value": "on",
+                 "disabled": True,
+                 "title": "lenses apply to the entities view — switch back "
+                          "to entities to use this"}]
     return [{"label": " highlight expansions", "value": "on",
              "disabled": not enabled,
              "title": ("keep the whole graph but light the expansion trail: "
-                       "subject → drilled parents → children stay bright, "
-                       "back-links half-lit, everything else fades"
+                       "subject → drilled parents → children glow at full "
+                       "colour, everything else fades to small ghosts"
                        if enabled else
                        "expand a node first (double-click one, or use the "
                        "Expand button) — this lens highlights expansions")}]
@@ -2173,7 +2173,8 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
             _graph_caption(stats, r["ego"]),
             _drivers_card(ev), _paths_card(ev), search_opts,
             "theme-%s" % theme, view_sig, sort_by, search_val,
-            _isolate_options(bool(expanded)))
+            _isolate_options(bool(expanded),
+                             in_clusters=(view_mode or "entities") == "clusters"))
 
 
 # ---- counterparty table: server-side custom filtering + row selection ----
