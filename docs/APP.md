@@ -93,7 +93,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 
 | Control | What it does |
 |---|---|
-| entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view) |
+| entities / clusters | the drill-down view vs the broad community view (hexagons sized by member count; click one to list members, click a member to open it in entity view). **Both views share the motion model**: in live mode the hexagons open on a deterministic ring — subject centred, heaviest communities (most alerted members) from 12 o'clock — and ride the same physics simulation, so dragging a community tugs its flow-connected neighbours exactly like entity nodes |
 | highlight expansions | the expansion lens — **emphasis, never removal**, with HARD two-tier contrast: the trail (subject → drilled parents → revealed children) keeps full colour **plus an accent glow** and bright trail edges; every other node fades to a small unlabeled ghost. Edges touching the trail stay as faint whispers so back-links remain traceable. The caption reports both tiers ("8 trail entities glowing · 24 faded to ghosts"). **Disabled (with a tooltip) without an expansion and in the clusters view**, and unticks itself when expansions reset — it can never silently do nothing |
 | Show top (10/25/50/100) | how many of the subject's riskiest DIRECT counterparties form the baseline view |
 | Min risk | live-filters the view while dragging. **Alerted entities are exempt** (an alert can never be filtered off screen), so on an alert-heavy case the picture may not change — the caption then says "N alerted kept despite min-risk X" |
@@ -102,7 +102,7 @@ to replace with SSO/LDAP/OAuth; the UI doesn't change.
 | key risk path | force-draws the top Stage-C path |
 | ◎ Center subject | pans/zooms onto the seed diamond and focuses it |
 | Reset view | entities mode, top 25, min risk 0, no expansions — **and rebuilds the canonical layout from scratch** (subject centred, ring, blooms), discarding every dragged position. This is the rescue hatch: whatever state the canvas is in, Reset view restores a readable graph |
-| Advanced | edge-family toggles and layout modes. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (hop-1 ring, children bloom from their parent) — dragging tugs springs, nothing ever reshuffles. The sim is energy-bounded: stacked nodes get a gentle constant push (never a 1/d² catapult) and per-tick velocity is capped, so no state can fling nodes off-canvas; **force** = static; **rings** = concentric by hop |
+| Advanced | edge-family toggles and layout modes, applying to BOTH views. **live physics** = a continuous Obsidian-style force simulation over the server's deterministic placement (entity view: hop-1 ring, children bloom from their parent; cluster view: importance-ranked hexagon ring; cluster edges rest longer so hexagons keep breathing room) — dragging tugs springs, nothing ever reshuffles. The sim is energy-bounded: stacked nodes get a gentle constant push (never a 1/d² catapult) and per-tick velocity is capped, so no state can fling nodes off-canvas; **force** = static; **rings** = concentric by hop (falls back to the static layout in the cluster view — communities have no hops) |
 | click a node / edge / cluster / table row | inspects it (the camera never moves on click) |
 | Search entity… | focus any scored node by name/id |
 

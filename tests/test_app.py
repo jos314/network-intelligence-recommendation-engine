@@ -174,6 +174,42 @@ def test_cluster_view():
     pytest.skip("no communities in any fixture ego")
 
 
+def test_cluster_placement_hints():
+    """Cluster hexagons share the entity view's placement contract: the
+    subject sits at the origin, every community carries a deterministic
+    ring hint, and no two open on the same spot."""
+    for cid in CASES:
+        els, _ = _elements(cid, 25, 0.0, ["txn", "identity"], mode="clusters")
+        nodes = [e["data"] for e in els if "source" not in e["data"]]
+        if len(nodes) < 3:
+            continue
+        assert all(isinstance(n.get("x0"), float) for n in nodes)
+        seed = next(n for n in nodes if n.get("is_seed"))
+        assert (seed["x0"], seed["y0"]) == (0.0, 0.0)
+        spots = {(n["x0"], n["y0"]) for n in nodes}
+        assert len(spots) == len(nodes)
+        radii = [(n["x0"] ** 2 + n["y0"] ** 2) ** 0.5
+                 for n in nodes if n.get("is_cluster")]
+        assert min(radii) >= 299  # the ring never opens inside the subject
+        # identical inputs -> identical layout, every time
+        els2, _ = _elements(cid, 25, 0.0, ["txn", "identity"], mode="clusters")
+        assert [e["data"].get("x0") for e in els2 if "source" not in e["data"]] \
+            == [n["x0"] for n in nodes]
+        return
+    pytest.skip("no communities in any fixture ego")
+
+
+def test_cluster_layout_follows_radio():
+    """live = preset + sim in BOTH views; static modes fall back to cose
+    for clusters (rings-by-hop has no meaning for communities)."""
+    live = _render_case(1, view_mode="clusters", layout_mode="live")[2]
+    assert live["name"] == "preset"
+    static = _render_case(1, view_mode="clusters", layout_mode="rings")[2]
+    assert static["name"] == "cose"
+    force = _render_case(1, view_mode="clusters", layout_mode="force")[2]
+    assert force["name"] == "cose"
+
+
 def test_key_path_highlight_forced_into_view():
     els, stats = _elements(3, 1, 0.9, ["txn", "identity"], highlight=True)
     ids = {e["data"]["id"] for e in els if "source" not in e["data"]}

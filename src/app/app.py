@@ -576,21 +576,23 @@ def _cluster_elements(case_id):
         "decision": seed_a.get("decision", config.DECISION_NO_ACTION),
         "alerted": bool(seed_a.get("alerted")), "is_seed": True,
         "node_type": seed_a.get("node_type"),
+        "x0": 0.0, "y0": 0.0,
     }, "classes": ""})
 
-    def _cluster_node(gid, members, label):
+    def _cluster_data(gid, members, label):
         risks = [ego.nodes[m].get("final_risk", 0.0) for m in members]
         worst = max(members, key=lambda m: order.index(
             ego.nodes[m].get("decision", config.DECISION_NO_ACTION)))
         alerted_k = sum(1 for m in members if ego.nodes[m].get("alerted"))
-        els.append({"data": {
+        return {
             "id": gid, "label": label, "is_cluster": True,
             "cluster_size": len(members),
             "risk": round(max(risks, default=0.0), 3),
             "decision": ego.nodes[worst].get("decision", config.DECISION_NO_ACTION),
             "alerted": alerted_k > 0, "alerted_count": alerted_k,
-        }, "classes": "cluster"})
+        }
 
+    specs = []
     for cid, members in sorted(groups.items()):
         members = [m for m in members if m != seed]
         if not members:
@@ -599,10 +601,22 @@ def _cluster_elements(case_id):
         label = "%s +%d" % ((ego.nodes[top].get("name")
                              or _display_id(top, ego.nodes[top]))[:16],
                             len(members) - 1)
-        _cluster_node("cl_%s" % cid, members, label)
+        specs.append(_cluster_data("cl_%s" % cid, members, label))
     rest = [n for n in ego.nodes if node_group[n] == UNCLUSTERED and n != seed]
     if rest:
-        _cluster_node(UNCLUSTERED, rest, "unclustered (%d)" % len(rest))
+        specs.append(_cluster_data(UNCLUSTERED, rest, "unclustered (%d)" % len(rest)))
+
+    # deterministic placement, same contract as the entity view: subject at
+    # the origin, communities on a ring — heaviest (most alerted members,
+    # then largest) start at 12 o'clock; the radius grows with the count so
+    # hexagons never open overlapped. The live-physics sim relaxes from here.
+    specs.sort(key=lambda d: (-d["alerted_count"], -d["cluster_size"], d["id"]))
+    ring_r = max(300.0, len(specs) * 82 / (2 * math.pi))
+    for i, d in enumerate(specs):
+        ang = 2 * math.pi * i / max(len(specs), 1) - math.pi / 2
+        d["x0"] = round(ring_r * math.cos(ang), 1)
+        d["y0"] = round(ring_r * math.sin(ang), 1)
+        els.append({"data": d, "classes": "cluster"})
 
     flows = {}
     for u, v, d in ego.edges(data=True):
@@ -1672,9 +1686,10 @@ app.clientside_callback(
             if (!cy) { return; }
 
             const liveMode = function () {
+                // both views share the motion model — cluster hexagons carry
+                // ring hints and ride the same simulation as entity nodes
                 const m = document.querySelector('#layout-mode input:checked');
-                return m && m.value === 'live'
-                    && cy.nodes('[?is_cluster]').length === 0;
+                return m && m.value === 'live';
             };
 
             // A case switch is a NEW investigation: shared counterparties
@@ -1784,13 +1799,17 @@ app.clientside_callback(
                             force[b.id()].x -= fx; force[b.id()].y -= fy;
                         }
                     }
-                    // springs along edges
+                    // springs along edges — hexagons are big, so edges that
+                    // touch a cluster rest longer than entity edges
                     cy.edges().forEach(function (e) {
-                        const s = e.source().id(), t = e.target().id();
+                        const sn = e.source(), tn = e.target();
+                        const s = sn.id(), t = tn.id();
                         if (!pos[s] || !pos[t] || s === t) { return; }
                         let dx = pos[t].x - pos[s].x, dy = pos[t].y - pos[s].y;
                         const d = Math.sqrt(dx * dx + dy * dy) || 1;
-                        const F = 0.05 * (d - 95);
+                        const rest = (sn.data('is_cluster') || tn.data('is_cluster'))
+                            ? 185 : 95;
+                        const F = 0.05 * (d - rest);
                         const fx = dx / d * F, fy = dy / d * F;
                         force[s].x += fx; force[s].y += fy;
                         force[t].x -= fx; force[t].y -= fy;
@@ -2161,13 +2180,16 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
                            layout_mode, sorted(expanded or []),
                            bool(highlight), view_mode, bool(isolate),
                            place_nonce or 0])
-    # cluster mode always uses the static force layout — the live physics
-    # simulation only makes sense for entity nodes with placement hints.
-    # Static layouts get a fresh dict identity when the element set changed
-    # so dash-cytoscape re-runs them (new nodes must be laid out).
-    layout = _static_layout(
-        "force" if (view_mode or "entities") == "clusters" else layout_mode,
-        ev["subject_id"], els)
+    # both views share the motion model: "live" = preset + hints + the
+    # clientside sim (cluster hexagons carry ring hints just like entities);
+    # force/rings = static cose — rings-by-hop has no meaning for
+    # communities, so it falls back to force in the cluster view. Static
+    # layouts get a fresh dict identity when the element set changed so
+    # dash-cytoscape re-runs them (new nodes must be laid out).
+    eff_layout = layout_mode
+    if (view_mode or "entities") == "clusters" and layout_mode != "live":
+        eff_layout = "force"
+    layout = _static_layout(eff_layout, ev["subject_id"], els)
     return (els, _stylesheet(theme), layout,
             _decision_panel(case_id, ev), _quickstats_panel(ev),
             _graph_caption(stats, r["ego"]),
