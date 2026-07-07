@@ -1861,7 +1861,14 @@ app.clientside_callback(
                 const sim = {alpha: 0, running: false, vel: {}};
                 cy.__sim = sim;
                 const liveOn = function () {
+                    // with no edges there are no springs to hold structure,
+                    // so the repulsion/gravity forces would just make nodes
+                    // drift forever. Freeze the autonomous sim in that case:
+                    // nodes stay where they were placed, and cytoscape still
+                    // lets the user drag them around (and they stay put on
+                    // release, because no kick re-warms the sim).
                     return liveMode()
+                        && cy.edges().length > 0
                         && cy.nodes().length > 1 && cy.nodes().length <= 500;
                 };
                 const tick = function () {
