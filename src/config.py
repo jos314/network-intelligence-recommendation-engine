@@ -47,6 +47,16 @@ TOP_N_DEFAULT = 25
 TOP_N_OPTIONS = [10, 25, 50, 100]
 EXPAND_TOP_K = 25
 
+# how the top-N baseline is RANKED (entities: which counterparties; clusters:
+# which communities). Risk is the investigator default; amount / #-transactions
+# surface the biggest money movers regardless of score.
+RANK_BY_DEFAULT = "risk"
+RANK_BY_OPTIONS = [
+    {"label": "Risk", "value": "risk"},
+    {"label": "Amount transacted", "value": "amount"},
+    {"label": "# Transactions", "value": "txns"},
+]
+
 # ------------------------------------------ Stage D scale guards
 STAGE_D_BTW_EXACT_N = 1200    # above this, sample betweenness (k nodes)
 STAGE_D_BTW_SAMPLE = 150

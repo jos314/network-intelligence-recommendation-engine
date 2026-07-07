@@ -16,12 +16,12 @@ def _render_case(case_id, **over):
     args = dict(top_n=config.TOP_N_DEFAULT, min_risk=0.0,
                 edge_kinds=["txn", "identity"], layout_mode="force",
                 highlight=[], theme="dark", expanded=[], view_mode="entities",
-                isolate=[], place_nonce=0)
+                isolate=[], place_nonce=0, rank_by=config.RANK_BY_DEFAULT)
     args.update(over)
     return _render(case_id, args["top_n"], args["min_risk"], args["edge_kinds"],
                    args["layout_mode"], args["highlight"], args["theme"],
                    args["expanded"], args["view_mode"], args["isolate"],
-                   args["place_nonce"])
+                   args["place_nonce"], args["rank_by"])
 
 
 @pytest.mark.parametrize("case_id", CASES)
@@ -50,6 +50,73 @@ def test_baseline_is_topN_hop1_plus_subject():
         if len(hop1) > 3:
             return
     pytest.skip("fixture egos too small to exercise the cap")
+
+
+def test_rank_by_amount_and_txns_reorders_the_baseline():
+    """Rank-by picks the top-N counterparties by money moved / txn count,
+    not by risk — and the chosen set actually matches those metrics."""
+    from src.app.app import _flow_map
+    for cid in CASES:
+        ego = _result(cid)["ego"]
+        hop1 = [n for n, a in ego.nodes(data=True) if a.get("hop") == 1]
+        if len(hop1) <= 3:
+            continue
+        fm = _flow_map(cid)
+        for metric, book in (("amount", fm["amount"]), ("txns", fm["count"])):
+            els, stats = _elements(cid, 3, 0.0, ["txn", "identity"],
+                                   rank_by=metric)
+            ids = [e["data"]["id"] for e in els
+                   if "source" not in e["data"] and not e["data"].get("is_seed")]
+            assert stats["rank_by"] == metric
+            # the shown counterparties are the true top-3 by that metric
+            want = sorted(hop1, key=lambda n: (book.get(n, 0),
+                                               ego.nodes[n].get("final_risk", 0)),
+                          reverse=True)[:3]
+            assert set(ids) == set(want)
+            # every shown node's metric >= every hidden hop-1 node's metric
+            hidden = [n for n in hop1 if n not in ids]
+            if hidden:
+                assert min(book.get(n, 0) for n in ids) >= \
+                    max(book.get(n, 0) for n in hidden)
+        return
+    pytest.skip("fixture egos too small to exercise ranking")
+
+
+def test_rank_by_flows_through_render_and_caption():
+    """The dropdown value reaches the graph and the caption names the metric."""
+    out = _render_case(1, rank_by="amount")
+    view_sig = out[10]
+    caption = str(out[5])
+    assert "amount" in view_sig
+    assert "amount transacted" in caption
+    # default still reads 'by risk'
+    assert "by risk" in str(_render_case(1, rank_by="risk")[5])
+
+
+def test_cluster_rank_by_limits_and_orders_communities():
+    """Clusters honour Show-top + Rank-by: top-N communities by the metric,
+    unclustered always shown, hidden count disclosed."""
+    from src.app.app import _cluster_elements
+    for cid in CASES:
+        _, full = _cluster_elements(cid, top_n=None, rank_by="amount")
+        if full["clusters_total"] <= 2:
+            continue
+        els, stats = _cluster_elements(cid, top_n=2, rank_by="amount")
+        clusters = [e["data"] for e in els
+                    if e["data"].get("is_cluster")
+                    and e["data"]["id"] != "cl_rest"]
+        assert len(clusters) == 2
+        assert stats["clusters_capped"] == full["clusters_total"] - 2
+        # ordered by amount desc around the ring
+        amts = [c["amount_sum"] for c in clusters]
+        assert amts == sorted(amts, reverse=True)
+        # no edge points at a hidden community
+        vis = {e["data"]["id"] for e in els if "source" not in e["data"]}
+        for e in els:
+            if "source" in e["data"]:
+                assert e["data"]["source"] in vis and e["data"]["target"] in vis
+        return
+    pytest.skip("no case with >2 communities")
 
 
 def test_expand_top_is_bounded_and_prioritises_alerted():

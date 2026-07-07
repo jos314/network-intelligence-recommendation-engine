@@ -315,11 +315,55 @@ def _cluster_groups(ego):
     return groups
 
 
+RANK_LABELS = {"risk": "risk", "amount": "amount transacted",
+               "txns": "# transactions"}
+
+_FLOW_CACHE = {}
+
+
+def _flow_map(case_id):
+    """Per-node (total txn amount, txn count) inside the ego, in one edge
+    pass and cached — powers ranking the baseline by money moved rather than
+    by score. Mirrors node_flow_summary (each incident txn edge counts once
+    per endpoint) so the numbers match the table and inspector."""
+    if case_id in _FLOW_CACHE:
+        return _FLOW_CACHE[case_id]
+    ego = _result(case_id)["ego"]
+    amt, cnt = {}, {}
+    for u, v, d in ego.edges(data=True):
+        if d.get("kind") != "txn":
+            continue
+        a = float(d.get("total_amount_base", 0.0))
+        c = int(d.get("txn_count", 0))
+        for n in (u, v):
+            amt[n] = amt.get(n, 0.0) + a
+            cnt[n] = cnt.get(n, 0) + c
+    m = {"amount": amt, "count": cnt}
+    _FLOW_CACHE[case_id] = m
+    return m
+
+
+def _rank_key(case_id, ego, rank_by):
+    """A sort key over node ids for the chosen ranking metric (desc)."""
+    if rank_by == "amount":
+        fm = _flow_map(case_id)["amount"]
+        return lambda n: fm.get(n, 0.0)
+    if rank_by == "txns":
+        fm = _flow_map(case_id)["count"]
+        return lambda n: fm.get(n, 0)
+    return lambda n: ego.nodes[n].get("final_risk", 0.0)
+
+
 def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
-              highlight=False, mode="entities", isolate=False):
+              highlight=False, mode="entities", isolate=False,
+              rank_by="risk"):
     """Graph elements + disclosure stats for the drill-down view model.
 
-    entities mode: subject + its TOP-N riskiest direct counterparties;
+    rank_by picks how the TOP-N baseline is ordered — "risk" (default),
+    "amount" (total transacted), or "txns" (transaction count) — for both
+    the entity counterparties and the cluster communities.
+
+    entities mode: subject + its TOP-N direct counterparties by rank_by;
     deeper hops appear only via expansions (double-click / Expand button).
     The highlighted key path is always force-included, alerted nodes among
     the visible set are exempt from the min-risk cut, and everything hidden
@@ -341,7 +385,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     Returns (elements, stats).
     """
     if mode == "clusters":
-        return _cluster_elements(case_id)
+        return _cluster_elements(case_id, top_n, rank_by)
     ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
     # expanded: {child: parent} (parent None when revealed without a drill,
@@ -356,7 +400,10 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     path_nodes, path_pairs = _top_path_members(case_id) if highlight else (set(), set())
 
     hop1 = [n for n, a in ego.nodes(data=True) if a.get("hop") == 1]
-    top_hop1 = sorted(hop1, key=lambda n: ego.nodes[n].get("final_risk", 0.0),
+    rkey = _rank_key(case_id, ego, rank_by)
+    # tie-break on risk so equal-money counterparties still order sensibly
+    top_hop1 = sorted(hop1, key=lambda n: (rkey(n),
+                                           ego.nodes[n].get("final_risk", 0.0)),
                       reverse=True)[:top_n]
     baseline = {seed} | set(top_hop1) | expanded | path_nodes
 
@@ -532,7 +579,7 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
                     "classes": " ".join(icls)})
 
     stats = {
-        "mode": "entities", "isolated": isolated,
+        "mode": "entities", "isolated": isolated, "rank_by": rank_by,
         "nodes_shown": len(visible), "nodes_total": ego.number_of_nodes(),
         "edges_shown": len(txn_groups) + len(ident_groups),
         "edges_total": len(total_groups),
@@ -549,12 +596,17 @@ def _elements(case_id, top_n, min_risk, edge_kinds, expanded=None,
     return els, stats
 
 
-def _cluster_elements(case_id):
+def _cluster_elements(case_id, top_n=None, rank_by="risk"):
     """The broad view: one node per Stage-D community, plus the subject and
-    an 'unclustered' bucket; edges = aggregated flows between groups."""
+    an 'unclustered' bucket; edges = aggregated flows between groups.
+
+    top_n keeps only the top communities by rank_by (risk / amount / txns);
+    the 'unclustered' bucket is always shown as context and is not counted
+    against the limit. Everything hidden is disclosed in the caption."""
     ego = _result(case_id)["ego"]
     seed = ego.graph["seed"]
     groups = _cluster_groups(ego)
+    fm = _flow_map(case_id)
 
     UNCLUSTERED = "cl_rest"
     node_group = {}
@@ -588,6 +640,8 @@ def _cluster_elements(case_id):
             "id": gid, "label": label, "is_cluster": True,
             "cluster_size": len(members),
             "risk": round(max(risks, default=0.0), 3),
+            "amount_sum": sum(fm["amount"].get(m, 0.0) for m in members),
+            "txn_sum": sum(fm["count"].get(m, 0) for m in members),
             "decision": ego.nodes[worst].get("decision", config.DECISION_NO_ACTION),
             "alerted": alerted_k > 0, "alerted_count": alerted_k,
         }
@@ -602,15 +656,32 @@ def _cluster_elements(case_id):
                              or _display_id(top, ego.nodes[top]))[:16],
                             len(members) - 1)
         specs.append(_cluster_data("cl_%s" % cid, members, label))
+
+    # rank the communities by the chosen metric and keep the top-N; risk
+    # keeps the investigator-friendly "alerted communities first" ordering
+    clusters_total = len(specs)
+    if rank_by == "amount":
+        specs.sort(key=lambda d: (-d["amount_sum"], -d["cluster_size"], d["id"]))
+    elif rank_by == "txns":
+        specs.sort(key=lambda d: (-d["txn_sum"], -d["cluster_size"], d["id"]))
+    else:
+        specs.sort(key=lambda d: (-d["alerted_count"], -d["risk"],
+                                  -d["cluster_size"], d["id"]))
+    clusters_capped = 0
+    if top_n and clusters_total > top_n:
+        clusters_capped = clusters_total - top_n
+        specs = specs[:top_n]
+
+    # the catch-all bucket is context, not a ranked community — always shown,
+    # placed last on the ring, never counted against the top-N limit
     rest = [n for n in ego.nodes if node_group[n] == UNCLUSTERED and n != seed]
     if rest:
         specs.append(_cluster_data(UNCLUSTERED, rest, "unclustered (%d)" % len(rest)))
 
     # deterministic placement, same contract as the entity view: subject at
-    # the origin, communities on a ring — heaviest (most alerted members,
-    # then largest) start at 12 o'clock; the radius grows with the count so
-    # hexagons never open overlapped. The live-physics sim relaxes from here.
-    specs.sort(key=lambda d: (-d["alerted_count"], -d["cluster_size"], d["id"]))
+    # the origin, communities on the ring in ranked order (heaviest at 12
+    # o'clock); radius grows with the count so hexagons never open overlapped.
+    # The live-physics sim relaxes from here.
     ring_r = max(300.0, len(specs) * 82 / (2 * math.pi))
     for i, d in enumerate(specs):
         ang = 2 * math.pi * i / max(len(specs), 1) - math.pi / 2
@@ -618,12 +689,15 @@ def _cluster_elements(case_id):
         d["y0"] = round(ring_r * math.sin(ang), 1)
         els.append({"data": d, "classes": "cluster"})
 
+    # only draw flows between VISIBLE communities — hidden (below-top-N)
+    # clusters take their edges with them
+    visible_groups = {d["id"] for d in specs} | {seed}
     flows = {}
     for u, v, d in ego.edges(data=True):
         if d.get("kind") != "txn":
             continue
         gu, gv = node_group[u], node_group[v]
-        if gu == gv:
+        if gu == gv or gu not in visible_groups or gv not in visible_groups:
             continue
         g = flows.setdefault((gu, gv), {"amount": 0.0, "count": 0})
         g["amount"] += float(d.get("total_amount_base", 0.0))
@@ -637,11 +711,13 @@ def _cluster_elements(case_id):
         }, "classes": ""})
 
     stats = {
-        "mode": "clusters",
+        "mode": "clusters", "rank_by": rank_by,
         "nodes_shown": len(els) and sum(1 for e in els if "source" not in e["data"]),
         "nodes_total": ego.number_of_nodes(),
         "edges_shown": len(flows), "edges_total": len(flows),
-        "clusters": len(groups), "unclustered": len(rest),
+        "clusters": len(specs) - (1 if rest else 0),
+        "clusters_total": clusters_total, "clusters_capped": clusters_capped,
+        "unclustered": len(rest),
         "hop1_shown": 0, "hop1_total": 0, "expanded_shown": 0,
         "alerted_offscreen": 0, "hidden_flagged": 0,
         "path_revealed": 0, "render_capped": 0,
@@ -1199,11 +1275,22 @@ def _paths_card(ev):
 
 
 def _graph_caption(stats, ego):
+    rank_lbl = RANK_LABELS.get(stats.get("rank_by", "risk"), "risk")
     if stats.get("mode") == "clusters":
-        parts = [html.Span("broad view: %d clusters + subject · %d aggregated flows"
-                           % (stats["clusters"], stats["edges_shown"])),
+        head = "broad view: %d clusters + subject · %d aggregated flows" % (
+            stats["clusters"], stats["edges_shown"])
+        if stats.get("clusters_capped"):
+            head = ("top %d of %s communities by %s · %d aggregated flows"
+                    % (stats["clusters"], format(stats["clusters_total"], ","),
+                       rank_lbl, stats["edges_shown"]))
+        parts = [html.Span(head),
                  html.Span("click a cluster to list its members",
                            className="caption-note")]
+        if stats.get("clusters_capped"):
+            parts.append(html.Span("%d smaller communities hidden — raise "
+                                   "Show top to reveal them"
+                                   % stats["clusters_capped"],
+                                   className="caption-warn"))
         if stats.get("unclustered"):
             parts.append(html.Span("%s entities without a community sit in "
                                    "'unclustered'" % format(stats["unclustered"], ",")))
@@ -1220,8 +1307,8 @@ def _graph_caption(stats, ego):
                   "full colour with an accent glow. Edges that connect the "
                   "trail back to the faded context stay as faint whispers.")]
     parts = [html.Span(
-        "top %d of %s direct counterparties by risk"
-        % (stats["hop1_shown"], format(stats["hop1_total"], ","))
+        "top %d of %s direct counterparties by %s"
+        % (stats["hop1_shown"], format(stats["hop1_total"], ","), rank_lbl)
         + (" · %d expanded" % stats["expanded_shown"]
            if stats["expanded_shown"] else ""),
         title="Double-click any node (or use the Expand button) to reveal "
@@ -1460,6 +1547,16 @@ def _main_layout(user):
                                                value=config.TOP_N_DEFAULT,
                                                clearable=False,
                                                style={"width": "80px"})]),
+                        html.Div([html.Div("Rank by", className="ctl-label"),
+                                  dcc.Dropdown(id="rank-by",
+                                               options=config.RANK_BY_OPTIONS,
+                                               value=config.RANK_BY_DEFAULT,
+                                               clearable=False,
+                                               style={"width": "160px"},
+                                               )],
+                                 title="Order the top-N counterparties / "
+                                       "communities by score, money moved, "
+                                       "or transaction count."),
                         html.Div([html.Div("Min risk", className="ctl-label"),
                                   dcc.Slider(id="min-risk", min=0, max=1,
                                              step=0.05, value=0.0,
@@ -2085,7 +2182,7 @@ def _cluster_jump_switches_view(clicks):
     Output("min-risk", "value"), Output("edge-kinds", "value"),
     Output("highlight-path", "value"), Output("isolate-exp", "value"),
     Output("expanded-store", "data", allow_duplicate=True),
-    Output("place-nonce", "data"),
+    Output("place-nonce", "data"), Output("rank-by", "value"),
     Input("reset-view-btn", "n_clicks"), State("place-nonce", "data"),
     prevent_initial_call=True,
 )
@@ -2096,7 +2193,7 @@ def _reset_view(n, nonce):
     # bumping the nonce makes the clientside pass forget every remembered
     # position: Reset view is the rescue hatch back to the canonical layout
     return ("entities", config.TOP_N_DEFAULT, 0.0, ["txn", "identity"],
-            [], [], {}, (nonce or 0) + 1)
+            [], [], {}, (nonce or 0) + 1, config.RANK_BY_DEFAULT)
 
 
 @app.callback(
@@ -2150,16 +2247,18 @@ def _conclusion_actions(n_refresh, n_save, text, case_id, bump):
     Input("highlight-path", "value"), Input("theme-store", "data"),
     Input("expanded-store", "data"), Input("view-mode", "value"),
     Input("isolate-exp", "value"), Input("place-nonce", "data"),
+    Input("rank-by", "value"),
 )
 def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
-            theme, expanded, view_mode, isolate, place_nonce):
+            theme, expanded, view_mode, isolate, place_nonce, rank_by):
     r = _result(case_id)
     ev = r["evidence"]
     els, stats = _elements(case_id, top_n or config.TOP_N_DEFAULT, min_risk,
                            edge_kinds or [], expanded,
                            highlight=bool(highlight),
                            mode=view_mode or "entities",
-                           isolate=bool(isolate))
+                           isolate=bool(isolate),
+                           rank_by=rank_by or config.RANK_BY_DEFAULT)
     ranked_nodes = sorted(r["ego"].nodes(data=True),
                           key=lambda t: t[1].get("final_risk", 0), reverse=True)
     search_opts = [{"label": "%s (%s)" % (a.get("name") or _display_id(n, a),
@@ -2179,7 +2278,7 @@ def _render(case_id, top_n, min_risk, edge_kinds, layout_mode, highlight,
     view_sig = json.dumps([case_id, top_n, min_risk, sorted(edge_kinds or []),
                            layout_mode, sorted(expanded or []),
                            bool(highlight), view_mode, bool(isolate),
-                           place_nonce or 0])
+                           place_nonce or 0, rank_by or config.RANK_BY_DEFAULT])
     # both views share the motion model: "live" = preset + hints + the
     # clientside sim (cluster hexagons carry ring hints just like entities);
     # force/rings = static cose — rings-by-hop has no meaning for
