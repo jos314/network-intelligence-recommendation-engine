@@ -7,6 +7,14 @@ decomposed after the fact. All weights and thresholds live in
 `src/config.py` — that file is the model documentation SMEs sign off on
 (SR 11-7).
 
+The stages run over whatever ego-network `DataAccess` returns and are
+**identical for both data sources** (see DATA.md). On the prebuilt masked
+graph, the entity signals below map to `GRAPH_NODES` columns
+(`HAS_PREV_TM_ALERT`, `PEP_FLAG`, `CRR`) and edge features already joined on
+`GRAPH_EDGES` (`TOTAL_AMOUNT_BASE`, the `SHARED_*` contact flags,
+`..._COUNTRY_RISK`, `EDGE_DIRECTION`); on the raw path they come from the
+crosswalked six tables.
+
 ```
 A own traits   B relationship   C propagation   D structure
       \              |               |              /
@@ -127,11 +135,14 @@ a false positive) and need SME sign-off before production.
 * **Evidence pack** — one machine-written JSON per case (decision, score,
   drivers, paths, alerted/sanctioned neighbours, shared-attribute links,
   structural flags, governance metadata). It feeds the app, the audit
-  trail, and the conclusion prompt.
-* **Conclusion prompt** — `output/conclusion_prompt_case_<n>.md` = fixed
-  instructions + the evidence pack verbatim + an output contract
-  ("≤200 words, no invented facts"). An analyst pastes it into any LLM;
-  the architecture doesn't care which (open question Q13).
+  trail, and the conclusion loop.
+* **AI conclusion loop** (no LLM API — VS Code Copilot) — the app exports
+  per-case metrics to `output/case_metrics/case_<n>.json` on every scoring
+  run. In VS Code, Copilot follows `skills/case-conclusion/SKILL.md` (fixed
+  instructions + output contract: "≤200 words, no invented facts, honour the
+  governance caveats") to write `output/conclusions/case_<n>.md`, which the
+  app's AI-conclusion card then displays (refresh / edit / save). The
+  contract keeps the write grounded in the exported metrics. See APP.md.
 
 ## Governance notes (SR 11-7)
 

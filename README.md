@@ -1,19 +1,20 @@
 # Network Intelligence & Recommendation Engine
 
 Counterparty network risk at the point of review for AML investigators.
-Given a case subject, the engine builds the subject's ego-network from six
-relational tables (HBUS PoC schema), scores every connected entity with a
-transparent staged pipeline, turns the calibrated score into one of
-**{No action, EDD, SAR}**, explains the drivers, and writes a grounded LLM
-prompt file for the case conclusion.
+Given a case subject, the engine extracts the subject's ego-network from a
+masked counterparty graph (or builds one from six raw HBUS PoC tables),
+scores every connected entity with a transparent staged pipeline, turns the
+calibrated score into one of **{No action, EDD, SAR}**, explains the drivers,
+and exports grounded per-case metrics for the AI conclusion.
 
 ## Documentation
 
 | Doc | Contents |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | system overview, runtimes, module map, tech stack, extension seams |
-| [docs/DATA.md](docs/DATA.md) | the six tables, ID crosswalk, entity resolution, switching to real data |
+| [docs/DATA.md](docs/DATA.md) | the two data paths (prebuilt masked graph + six raw tables), ID crosswalk, entity resolution, switching to real data |
 | [docs/SCORING.md](docs/SCORING.md) | stages A–H, weights, calibration, decision layer, governance |
+| [docs/synthetic-data-integration-brief.md](docs/synthetic-data-integration-brief.md) | the prebuilt `GRAPH_NODES`/`GRAPH_EDGES` extract: schema, crosswalk, loader |
 | [docs/APP.md](docs/APP.md) | login, screen guide, graph encodings, analyst workflow |
 
 Design origin: the vault note *Build Plan — App Architecture & Algorithms*
@@ -81,7 +82,7 @@ python3 -m venv .venv
 | P3 Stage F | `src/decision/calibration.py` | Platt scaling on weak alert labels; documented fallback |
 | P3 Stage G | `src/decision/rules.py` | hard overrides + threshold bands + case-level escalations |
 | P5 explain | `src/explain/` | exact additive driver attribution, key risk paths, evidence pack |
-| P5 conclusion | `src/conclusion/prompt_writer.py` | `output/conclusion_prompt_case_<n>.md` for manual LLM paste |
+| P5 conclusion | `src/conclusion/store.py` | exports `output/case_metrics/case_<n>.json`; VS Code Copilot + `skills/case-conclusion/SKILL.md` writes the narrative the app displays (`prompt_writer.py` keeps the legacy paste-into-LLM file) |
 | P4 app | `src/app/app.py` | Dash + cytoscape ego-graph, size=risk, red=SAR/yellow=EDD, ranked table |
 | v2 Stage H | `src/scoring/stage_h_learned.py` | learned aggregator seam (GraphSAGE/CARE-GNN) — intentionally not trained |
 
