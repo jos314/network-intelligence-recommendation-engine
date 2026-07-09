@@ -47,8 +47,13 @@ class PrebuiltGraphSource:
 
         n = self.nodes
         self._attrs = n.set_index("MASKED_CUSTOMER_ID")
-        self._orig2masked = dict(zip(n["ORIGINAL_CUSTOMER_ID"],
+        self._orig2masked = dict(zip(n["ORIGINAL_CUSTOMER_ID"].astype(str),
                                      n["MASKED_CUSTOMER_ID"]))
+        # padding-agnostic numeric fallback: also key real (numeric) originals
+        # by their INTEGER VALUE, so a plain int case id resolves no matter
+        # how ORIGINAL_CUSTOMER_ID happens to be zero-padded in the extract
+        self._numorig2masked = {int(o): m for o, m in self._orig2masked.items()
+                                if o.isdigit()}
 
         # ---- names (CUSTOMERS is keyed on the zero-padded original id) ----
         cust = tables["CUSTOMERS"]
@@ -145,9 +150,13 @@ class PrebuiltGraphSource:
         if s.upper().startswith("PSEUDO_"):
             return self._orig2masked.get(s)
         if s.isdigit():
-            return self._orig2masked.get(s.zfill(9))
+            return (self._orig2masked.get(s.zfill(9))     # padded-9 (usual)
+                    or self._orig2masked.get(s)           # stored unpadded
+                    or self._numorig2masked.get(int(s)))  # any other padding
         try:
-            return self._orig2masked.get(str(int(float(s))).zfill(9))
+            iv = int(float(s))
+            return (self._orig2masked.get(str(iv).zfill(9))
+                    or self._numorig2masked.get(iv))
         except ValueError:
             return None
 
